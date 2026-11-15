@@ -1724,6 +1724,8 @@ features.bulk-refunds=false
       location.hash = "#/app/api";
       const input = await waitFor(() => document.querySelector("#newname"));
       if (!input) return;
+      // bring the deploy line to the middle of the screen; from here the page follows each step as it runs
+      input.closest("li")?.scrollIntoView({ block: "center", behavior: "smooth" });
       await sleep(900);
       const name = current("api").suggested;
       for (let i = 1; i <= name.length; i += 3) { input.value = name.slice(0, i); input.dispatchEvent(new Event("input", { bubbles: true })); await sleep(40); }

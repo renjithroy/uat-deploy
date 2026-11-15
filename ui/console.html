@@ -1052,7 +1052,8 @@ function renderLine(root, a, op) {
   if (run !== lastRunning) {
     lastRunning = run;
     const el = run && [...root.children].find(x => x.dataset.k === run);
-    if (el) requestAnimationFrame(() => el.scrollIntoView({ block: gate ? "start" : "nearest", behavior: "smooth" }));
+    // keep the step that is working in the middle of the screen, so its live output is in view; a plan opens at its top
+    if (el) requestAnimationFrame(() => el.scrollIntoView({ block: gate ? "start" : "center", behavior: "smooth" }));
   }
   if (focus) { const inp = document.getElementById(focus[0]); if (inp) { inp.focus(); inp.setSelectionRange(focus[1], focus[2]); } }
   tick();

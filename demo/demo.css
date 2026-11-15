@@ -26,6 +26,7 @@ body { padding-top: var(--demo-h); height: auto; min-height: 100%; }
 /* room for the banner in the pages' own sticky and full-height layouts */
 .bar { top: var(--demo-h); }
 .drawer { top: var(--demo-h); }
+.line > li { scroll-margin-top: calc(var(--bar-h) + var(--demo-h) + 16px); }
 @media (min-width: 901px) {
   .shell { min-height: calc(100vh - var(--bar-h) - var(--demo-h)); }
   .side { top: calc(var(--bar-h) + var(--demo-h)); height: calc(100vh - var(--bar-h) - var(--demo-h)); }
