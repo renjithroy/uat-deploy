@@ -359,7 +359,8 @@ features.bulk-refunds=false
   const save = () => { clearTimeout(saveTimer); saveTimer = setTimeout(() => { try { if (W) sessionStorage.setItem(KEY, JSON.stringify(W)); } catch {} }, 50); };
   addEventListener("pagehide", () => { try { if (W) sessionStorage.setItem(KEY, JSON.stringify(W)); } catch {} });
 
-  window.__prefs = W.theme ? { theme: W.theme } : {};
+  // the demo opens in light mode whatever the OS prefers; the page's own toggle still switches to dark
+  window.__prefs = { theme: W.theme || "light" };
 
   const cur = () => {
     const tid = W.templates[W.current] ? W.current : Object.keys(W.templates)[0];
@@ -1616,7 +1617,7 @@ features.bulk-refunds=false
 
   const prefs = (method, body) => {
     if (method === "POST") { W.theme = ["light", "dark"].includes(body.theme) ? body.theme : ""; save(); return { ok: true }; }
-    return W.theme ? { theme: W.theme } : {};
+    return { theme: W.theme || "light" };
   };
 
   const CONSOLE_GET = {
@@ -1671,11 +1672,11 @@ features.bulk-refunds=false
   const params = new URLSearchParams(location.search);
   const console_ = (h) => `/?token=demo#/${h}`;
   const TRY = [
-    ["Deploy a new build", "app/api", "Build, read-only checks, then a gate that holds the written plan. Nothing changes until you approve."],
-    ["Change a config value", "app/api/config", "Describe it in words, review the diff (old lines are commented out, never deleted), approve, watch it go live."],
-    ["Ask about the server", "ask", "Read-only questions: each command Claude runs is shown with its output."],
-    ["See the audit log", "activity", "Every change made on UAT, by day and by app."],
-    ["Edit the project template", "cfg", "The configurator that describes servers, apps, builds and config files."],
+    ["Deploy", "app/api"],
+    ["Change config", "app/api/config"],
+    ["Ask the server", "ask"],
+    ["Audit log", "activity"],
+    ["Edit template", "cfg"],
   ];
 
   function tryCard() {
@@ -1683,14 +1684,16 @@ features.bulk-refunds=false
     const wrap = document.createElement("div");
     wrap.className = "demo-layer";
     wrap.innerHTML = `<div class="demo-scrim" data-demo="close"></div><section class="demo-card" role="dialog" aria-modal="true" aria-labelledby="demo-h">
+      <button type="button" class="demo-x" data-demo="close" aria-label="Close">&times;</button>
       <p class="demo-eyebrow">Live demo · simulated data</p>
-      <h2 id="demo-h">uat-deploy, the browser console of a Claude Code skill</h2>
-      <p>It deploys builds, changes config files and answers questions about a team's UAT servers, and every change waits for an approved, written plan. This copy runs against a made-up project (Acme Payments' <b>Shopfront</b>, four Spring Boot apps on one server), entirely in your browser.</p>
-      <ol class="demo-try">${TRY.map(([h, to, d], i) => `<li><button type="button" data-demo-go="${to}"><span class="demo-n">${i + 1}</span><span><b>${h}</b><small>${d}</small></span></button></li>`).join("")}</ol>
-      <div class="demo-acts"><button type="button" class="demo-play" data-demo="play">▶ Watch a deploy run by itself</button><button type="button" class="demo-skip" data-demo="close">Look around</button></div>
-      <p class="demo-tip">Tip: put <code>broken</code> in a build's name to see a failed start, then Roll back or Ask Claude why. <button type="button" class="demo-reset" data-demo="reset">Reset the demo</button></p></section>`;
+      <h2 id="demo-h">uat-deploy</h2>
+      <p class="demo-lede">Claude Code deploys to UAT servers. Nothing changes until you approve the plan.</p>
+      <button type="button" class="demo-play" data-demo="play"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z"/></svg>Watch demo</button>
+      <p class="demo-or">or try it yourself</p>
+      <div class="demo-try">${TRY.map(([h, to]) => `<button type="button" data-demo-go="${to}">${h}</button>`).join("")}</div>
+      <button type="button" class="demo-reset" data-demo="reset">Reset demo</button></section>`;
     document.body.append(wrap);
-    wrap.querySelector("[data-demo-go]").focus();
+    wrap.querySelector(".demo-play").focus();
   }
   const closeCard = () => document.querySelector(".demo-layer")?.remove();
 
@@ -1700,9 +1703,8 @@ features.bulk-refunds=false
     e.preventDefault();
     const act = t.dataset.demo, to = t.dataset.demoGo;
     if (act === "try") return tryCard();
-    if (act === "reset") { try { sessionStorage.removeItem(KEY); sessionStorage.setItem(KEY + ":seen", "1"); } catch {} W = null; if (IN_CFG) location.href = console_("apps"); else { history.replaceState(null, "", "#/apps"); location.reload(); } return; }
-    if (act === "close") { try { sessionStorage.setItem(KEY + ":seen", "1"); } catch {} return closeCard(); }
-    try { sessionStorage.setItem(KEY + ":seen", "1"); } catch {}
+    if (act === "reset") { try { sessionStorage.removeItem(KEY); } catch {} W = null; if (IN_CFG) location.href = console_("apps"); else { history.replaceState(null, "", "#/apps"); location.reload(); } return; }
+    if (act === "close") return closeCard();
     closeCard();
     if (act === "play") { if (IN_CFG) location.href = "/?token=demo&play=deploy-full#/apps"; else play("deploy-full"); return; }
     if (to === "cfg") { location.href = "/configure?token=demo#edit/shopfront"; return; }
@@ -1761,9 +1763,8 @@ features.bulk-refunds=false
 
   document.addEventListener("DOMContentLoaded", () => {
     const p = params.get("play");
-    let seen = false;
-    try { seen = !!sessionStorage.getItem(KEY + ":seen"); } catch {}
+    // the card opens on every load of the console; closing it (✕, Esc or the backdrop) leaves the page to explore
     if (p) play(p);
-    else if (!IN_CFG && !seen && params.get("tour") !== "0") setTimeout(tryCard, 700);
+    else if (!IN_CFG && params.get("tour") !== "0") setTimeout(tryCard, 500);
   });
 })();
