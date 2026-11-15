@@ -478,10 +478,19 @@ features.bulk-refunds=false
     const slugRaw = repo.branch.split("/").pop().toLowerCase().replace(/[^a-z0-9.-]/g, "-");
     const prefix = dep.name_prefix || a.id;
     const slug = prefix.endsWith(slugRaw) ? "" : slugRaw;
-    const suggested = `${prefix}-${md(new Date())}${slug ? "-" + slug : ""}${ext}`;
     const L = liveOf(a.id), cur = L.active || L.file;
+    // the demo always offers a name that deploys cleanly: never the running jar, the previous one, or one deployed earlier
+    const taken = new Set([L.active, L.file, L.prev, ...(L.used || [])].filter(Boolean));
+    const free = (stem) => {
+      const m = /^(.*)-v(\d+)$/.exec(stem), base = m ? m[1] : stem;
+      let n = m ? +m[2] : 1, name = stem + ext;
+      while (taken.has(name)) name = `${base}-v${++n}${ext}`;
+      return name;
+    };
+    const suggested = free(`${prefix}-${md(new Date())}${slug ? "-" + slug : ""}`);
     let append = "";
-    if (cur) { const stem = cur.slice(0, cur.length - ext.length), m = /^(.*-v)(\d+)$/.exec(stem); append = m ? `${m[1]}${+m[2] + 1}${ext}` : `${stem}-v2${ext}`; }
+    if (cur) { const stem = cur.slice(0, cur.length - ext.length); append = free(/-v\d+$/.test(stem) ? stem : `${stem}-v2`); }
+    if (append === suggested) append = "";
     return { suggested, append, branch: repo.branch };
   }
 
@@ -492,6 +501,12 @@ features.bulk-refunds=false
                   pid: up ? L.pid : "", runningFile: up ? L.file : "", activeFile: L.active || L.file, activeLine: style === "jar-start-script" ? L.line : "",
                   suggested: "", append: "", branch: "", missingDir: "" };
     if (style !== "none") Object.assign(out, suggestions(a));
+    // the demo's default path always succeeds: an empty name field, or one still holding a name already on the server
+    // (the jar just deployed), is filled with the free suggested name; a name the visitor typed is left alone
+    try {
+      const d = S.drafts[appId], onServer = [L.active, L.file, L.prev, ...(L.used || [])];
+      if (out.suggested && (!d || onServer.includes(d))) S.drafts[appId] = out.suggested;
+    } catch { /* the page has not started yet */ }
     return out;
   }
 
@@ -784,7 +799,7 @@ features.bulk-refunds=false
       }
       op.canRollback = v.hasRollback;
       op.facts = [["New file", "on the server"], ["Switch", "done: the next start runs the new file"]];
-      L.prev = L.file; L.active = op.name; L.deployed = op.name; save();
+      L.prev = L.file; L.active = op.name; L.deployed = op.name; L.used = [...new Set([...(L.used || []), op.name])]; save();
     } else if (op.kind === "rollback") {
       const keys = op.stations.filter(s => !["gate", "stop", "start", "ready"].includes(s.key)).map(s => s.key);
       const src = op.source, prev = L.prev || L.file;
