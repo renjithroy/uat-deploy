@@ -1,0 +1,132 @@
+# UAT template for the uat-deploy skill. Edit it from /uat-deploy (Edit template) or by hand,
+# then check it with: uat template-check shopfront
+schema: 1
+id: shopfront
+name: Shopfront
+description: Acme Payments storefront API, payments worker, admin portal and config server, on one UAT server.
+servers:
+  uat:
+    label: Shopfront UAT
+    host: 203.0.113.10
+    user: deploy
+    aliases:
+      - shopfront-uat
+    notes: |
+      Ubuntu 22.04 with Java 21 (Temurin). Every app runs as deploy from its own folder under /opt/acme.
+      git on the server is 2.34; the config repo is the only git repo there.
+      Every stop.sh kills its app by port, so give a stop up to 30 seconds before starting again.
+      The server's default git identity is a shared bot account, so config commits pass the deployer's name and email.
+defaults:
+  start_timeout: 180
+  stop_timeout: 30
+  ready:
+    log: Started [A-Za-z0-9_$]+ in [0-9.]+ seconds
+    fail: APPLICATION FAILED TO START
+apps:
+  - id: api
+    name: storefront-api
+    server: uat
+    dir: /opt/acme/storefront-api
+    port: 8080
+    log: /opt/acme/logs/storefront-api/app.log
+    start: ./start-api.sh
+    stop: ./stop.sh
+    build:
+      repo: shopfront
+      detect: storefront-api/pom.xml
+      command: mvn clean package -DskipTests -pl storefront-api -am
+      output: storefront-api/target/*.jar
+    deploy:
+      style: jar-start-script
+      edit: duplicate
+      name_prefix: api
+    configs:
+      - id: main
+        path: /opt/acme/config-repo/storefront-api-uat.yml
+        format: yaml
+        git_repo: /opt/acme/config-repo
+        served_by: config
+        verify_url: http://localhost:8888/storefront-api-uat.yml?resolvePlaceholders=false
+        restart:
+          - config
+          - api
+    instructions: |
+      It talks to the payments sandbox only. Never point any of its URLs at a live payment gateway.
+      Its start script truncates the log with > on every start, so read the log right after a failed start.
+  - id: payments
+    name: payments-worker
+    server: uat
+    dir: /opt/acme/payments-worker
+    port: 8082
+    log: /opt/acme/logs/payments-worker/worker.log
+    start: ./start-worker.sh
+    stop: ./stop.sh
+    build:
+      repo: shopfront
+      detect: payments-worker/pom.xml
+      command: mvn clean package -DskipTests -pl payments-worker -am
+      output: payments-worker/target/*.jar
+    deploy:
+      style: jar-start-script
+      edit: replace
+      name_prefix: worker
+    configs:
+      - id: main
+        path: /opt/acme/config-repo/payments-worker-uat.yml
+        format: yaml
+        git_repo: /opt/acme/config-repo
+        served_by: config
+        verify_url: http://localhost:8888/payments-worker-uat.yml?resolvePlaceholders=false
+        restart:
+          - config
+          - payments
+    instructions: |
+      Built from the same repo as storefront-api.
+      Its start script spreads the java command over several lines, so the jar name is replaced in place.
+  - id: admin
+    name: admin-portal
+    server: uat
+    dir: /opt/acme/admin-portal
+    port: 8090
+    log: /opt/acme/logs/admin-portal/admin.log
+    start: ./start.sh
+    stop: ./stop.sh
+    ready:
+      url: http://localhost:8090/actuator/health
+    build:
+      repo: admin-portal
+      detect: pom.xml
+      command: ./mvnw clean package -DskipTests
+      output: target/*.jar
+    deploy:
+      style: custom
+      name_prefix: admin
+      upload_dir: /opt/acme/admin-portal/releases
+      steps:
+        - ln -sfn releases/{new} current.jar
+        - echo {new} >> releases/DEPLOYED
+      rollback:
+        - sed -i '$d' releases/DEPLOYED
+        - ln -sfn releases/$(tail -n 1 releases/DEPLOYED) current.jar
+    configs:
+      - id: props
+        path: /opt/acme/admin-portal/config/application-uat.properties
+        format: properties
+        restart:
+          - admin
+    instructions: start.sh runs current.jar, a symlink into releases/, so a deploy only moves the link.
+  - id: config
+    name: config-server
+    server: uat
+    dir: /opt/acme/config-server
+    port: 8888
+    log: /opt/acme/logs/config-server/config.log
+    start: ./start.sh
+    stop: ./stop.sh
+    instructions: |
+      Spring Cloud Config Server for storefront-api and payments-worker. It serves the git repo /opt/acme/config-repo
+      and reads it only at startup, so restart it after every config commit, then restart the app.
+instructions: |
+  An app reads its config only at startup: after a config commit, restart the config server first, then the app.
+  Start and stop scripts live in each app's folder; never start an app any other way.
+  UAT shares the payments sandbox with the QA team: say in the team channel before restarting payments-worker.

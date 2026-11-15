@@ -1,0 +1,1903 @@
+#!/usr/bin/env python3
+"""uat-deploy console (UI mode): a local page for everything the skill does on the chosen template: deploy, restart
+and roll back apps, change config files, ask read-only questions about UAT, and manage templates and settings.
+
+Usage: uat-console [APP] [--view V] [--no-open]   start (or reuse) the page server, open the page, print OPEN=<link>
+                                                  V: apps, config (with APP), ask, activity, templates
+       uat-console --wait              block until an operation on the page finishes or the page closes;
+                                       print what happened, then CONSOLE=open or CLOSED=<why>
+Every change on UAT goes through scripts/uat, after the Approve button of the plan shown on the page. Questions and
+config edits are prepared by headless Claude Code, which may run only the helper's read-only and local commands.
+The server listens on 127.0.0.1 only and answers only requests that carry its one-time token.
+"""
+import argparse
+import collections
+import concurrent.futures
+import hashlib
+import hmac
+import http.server
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import secrets
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import uatlib as L  # noqa: E402
+import uattpl as T  # noqa: E402
+
+PAGE = T.SKILL / "ui" / "console.html"
+CONFIGURATOR = T.SKILL / "ui" / "index.html"
+PROMPTS = T.SKILL / "prompts"
+CLAUDE = shutil.which("claude")
+MODEL = os.environ.get("UAT_DEPLOY_MODEL") or "sonnet"
+BUDGET = os.environ.get("UAT_DEPLOY_BUDGET_USD") or "2"
+DEPLOY_KINDS = ("deploy", "restart", "rollback")
+CONFIG_KINDS = ("config", "config-revert")
+UAT = HERE / "uat"
+# The session file holds the page token, so it stays out of the cache folder the skill lets Claude read.
+RUN = T.STATE_DIR / "console"
+SESSION = RUN / "session.json"
+REPORTED = RUN / "reported.json"
+PREFS = RUN / "prefs.json"
+IDLE_SECONDS = 45 * 60
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$")
+STEP_RE = re.compile(r"^\[(\d+)/(\d+)\] (.*)$")
+CHECK_RE = re.compile(r"^(PASS|FAIL|WARN|INFO)\s+(.*)$")
+MAX_LINES = 1500
+
+
+class ApiError(Exception):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status, self.message = status, message
+
+
+class App:
+    token = ""
+    hosts = set()
+    server = None
+    closed = ""
+    last_page = time.time()   # last request from the page; the idle clock
+    last_wait = 0.0           # last time uat console --wait was listening
+    lock = threading.Condition()
+    ops = {}                  # id -> Op
+    busy_apps = {}            # app id -> op id
+    busy_repos = {}           # local repo name -> op id
+    outbox = []               # what --wait reports: finished operations and requests from the page
+    seq = 0
+
+
+def now_ms():
+    return int(time.time() * 1000)
+
+
+# ---------------------------------------------------------------- the template, as the page needs it
+
+
+def chosen():
+    try:
+        return T.resolve(strict=False)
+    except T.TemplateError as e:
+        raise ApiError(409, str(e))
+
+
+def app_of(app_id):
+    t, tid, local = chosen()
+    if not isinstance(app_id, str) or not T.ID_RE.match(app_id):
+        raise ApiError(400, "Name an app.")
+    try:
+        return t, tid, local, T.find_app(t, app_id)
+    except T.TemplateError as e:
+        raise ApiError(404, str(e))
+
+
+def ready_text(t, a):
+    r = T.ready_of(t, a)
+    parts = []
+    if a.get("log") and r.get("log"):
+        parts.append(f"log line /{r['log']}/")
+    if a.get("port"):
+        parts.append(f"port {a['port']} open")
+    if r.get("url"):
+        parts.append(f"{r['url']} answers")
+    limit = T.timeout_of(t, a, "start_timeout", T.DEFAULT_START_TIMEOUT)
+    return (", ".join(parts) if parts else "the process is up") + f", up to {limit} s"
+
+
+def restart_route(t, a):
+    return [{"key": "stop", "zone": "change", "label": "Stop", "what": a.get("stop") or ""},
+            {"key": "start", "zone": "change", "label": "Start", "what": a.get("start") or ""},
+            {"key": "ready", "zone": "read", "label": "Wait until ready", "what": ready_text(t, a)}]
+
+
+def push_route(a):
+    dep = a.get("deploy") or {}
+    if dep.get("style") == "jar-start-script":
+        s = T.start_script(a) or "the start script"
+        return [{"key": "copy", "zone": "change", "label": "Copy the new file", "what": a.get("dir") or ""},
+                {"key": "unchanged", "zone": "read", "label": "Confirm the start script is unchanged", "what": s},
+                {"key": "backup", "zone": "change", "label": "Back up the start script", "what": f"{s}.bak-<time>"},
+                {"key": "switch", "zone": "change", "label": "Point the start script at the new file",
+                 "what": "comment the old line, add a copy" if (dep.get("edit") or "duplicate") == "duplicate" else "swap the name in place"}]
+    out = [{"key": "copy", "zone": "change", "label": "Upload the new file", "what": dep.get("upload_dir") or a.get("dir") or ""}]
+    for i, c in enumerate(dep.get("steps") or []):
+        out.append({"key": f"step{i + 1}", "zone": "change", "label": f"Step {i + 1}", "what": c})
+    return out
+
+
+def rollback_route(a):
+    dep = a.get("deploy") or {}
+    if dep.get("style") == "jar-start-script":
+        return [{"key": "restore", "zone": "change", "label": "Restore the start script", "what": "from the backup made before the deploy"}]
+    return [{"key": f"rb{i + 1}", "zone": "change", "label": f"Rollback step {i + 1}", "what": c}
+            for i, c in enumerate(dep.get("rollback") or [])]
+
+
+def deploy_route(t, a, build_cmd):
+    out = a.get("build") or {}
+    return ([{"key": "name", "zone": "local", "label": "Name the new file", "what": ""},
+             {"key": "build", "zone": "local", "label": "Build", "what": build_cmd},
+             {"key": "rename", "zone": "local", "label": "Rename the built file", "what": out.get("output") or ""},
+             {"key": "check", "zone": "read", "label": "Check UAT", "what": "folder, scripts, disk, name; nothing changes"},
+             {"key": "gate", "zone": "gate", "label": "Your approval", "what": ""}]
+            + push_route(a) + restart_route(t, a))
+
+
+def app_view(t, tid, local, a):
+    Lc = T.local_template(local, tid)
+    build, dep = a.get("build") or {}, a.get("deploy") or {}
+    style = dep.get("style") or "none"
+    repo = build.get("repo") or ""
+    path = os.path.expanduser((Lc.get("repos") or {}).get(repo) or "") if repo else ""
+    cmd = (Lc.get("builds") or {}).get(a["id"]) or build.get("command") or ""
+    blocked = ""
+    if style != "none":
+        if not cmd:
+            blocked = "The template has no build command for this app."
+        elif not path:
+            blocked = f"The local folder of the '{repo}' repo is not set on this machine."
+        elif not os.path.isdir(path):
+            blocked = f"The local folder of the '{repo}' repo is missing: {path}"
+    s = (t.get("servers") or {}).get(a.get("server")) or {}
+    return {
+        "id": a["id"], "name": a.get("name") or a["id"], "server": a.get("server"), "target": T.server_key(s),
+        "dir": a.get("dir"), "port": a.get("port") or None, "process": a.get("process") or "", "log": a.get("log") or "",
+        "start": a.get("start") or "", "stop": a.get("stop") or "", "style": style, "ext": T.artifact_ext(a),
+        "startScript": (T.start_script(a) or "") if style == "jar-start-script" else "",
+        "repo": repo, "repoPath": path, "build": cmd, "buildOverride": bool((Lc.get("builds") or {}).get(a["id"])),
+        "blocked": blocked, "ready": ready_text(t, a),
+        "hasRollback": style == "jar-start-script" or bool(dep.get("rollback")),
+        "configs": [{"id": c.get("id"), "path": c.get("path"), "format": T.config_format(c), "git": bool(c.get("git_repo")),
+                     "servedBy": c.get("served_by") or "", "verify": bool(c.get("verify_url")), "restart": c.get("restart") or []}
+                    for c in a.get("configs") or []],
+        "route": deploy_route(t, a, cmd) if style != "none" else [],
+        "restartRoute": restart_route(t, a),
+        "op": latest_op(a["id"], DEPLOY_KINDS), "cfgOp": latest_op(a["id"], CONFIG_KINDS),
+        "busyBy": busy_by(a["id"]),
+    }
+
+
+def latest_op(app_id, kinds):
+    return next((o.id for o in sorted(App.ops.values(), key=lambda o: -o.started)
+                 if o.app == app_id and o.kind in kinds and not o.dismissed), None)
+
+
+def busy_by(app_id):
+    """What keeps this app busy when it is another app's operation (a restart after a config change)."""
+    op = App.ops.get(App.busy_apps.get(app_id))
+    return f"Restarting for a config change of {op.label}" if op and op.app != app_id else ""
+
+
+def state(_=None):
+    t, tid, local = chosen()
+    errors, _w = T.validate(t, tid)
+    servers = []
+    for sid in T.used_servers(t):
+        s = (t.get("servers") or {}).get(sid) or {}
+        auth = T.auth_of(local, T.server_key(s))
+        ok = auth["password_saved"] if auth["auth"] == "password" else True
+        servers.append({"id": sid, "label": s.get("label") or sid, "target": T.server_key(s),
+                        "signIn": "password" if auth["auth"] == "password" else "SSH key", "signInReady": ok})
+    return {"template": {"id": tid, "name": t.get("name") or tid, "description": t.get("description") or "", "problems": len(errors)},
+            "templates": [{"id": x["id"], "name": x["name"]} for x in T.list_templates()],
+            "servers": servers, "user": os.environ.get("USER") or "",
+            "apps": [app_view(t, tid, local, a) for a in t.get("apps") or [] if isinstance(a, dict) and a.get("id")],
+            "claude": time.time() - App.last_wait < 40, "engine": bool(CLAUDE), "model": MODEL}
+
+
+def use_template(body):
+    tid = body.get("id")
+    if not isinstance(tid, str) or not T.ID_RE.match(tid) or not T.template_path(tid).exists():
+        raise ApiError(404, "There is no such template.")
+    with App.lock:
+        if App.busy_apps:
+            raise ApiError(409, "Wait for the running operation to finish before switching the project.")
+    local = T.load_local()
+    old = local.get("current_template") or ""
+    if old != tid:
+        local["current_template"] = tid
+        T.save_local(local)
+        T.audit("-", f"settings | template: '{old}' -> '{tid}'")
+    return state()
+
+
+# ---------------------------------------------------------------- the helper
+
+
+def helper(args, timeout=150):
+    """Run scripts/uat to the end; (exit status, output lines)."""
+    try:
+        p = subprocess.run([str(UAT), *args], capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return 124, ["ERROR: the server took too long to answer"]
+    return p.returncode, [l.rstrip() for l in (p.stdout + p.stderr).splitlines()]
+
+
+def error_of(lines, fallback):
+    return next((l[6:].strip() for l in reversed(lines) if l.startswith("ERROR:")), "") or fallback
+
+
+def seconds_of(etime):
+    days, _, clock = etime.rpartition("-")
+    n = 0
+    for part in clock.split(":"):
+        n = n * 60 + int(part)
+    return n + int(days or 0) * 86400
+
+
+def current(app_id):
+    """What runs now, read-only (uat current)."""
+    rc, lines = helper(["current", app_id], 90)
+    kv = dict(l.split("=", 1) for l in lines if re.match(r"^[A-Z_]+=", l))
+    out = {"app": app_id, "at": now_ms(), "ok": rc == 0, "error": "" if rc == 0 else error_of(lines, "could not read the app's state"),
+           "running": "unknown", "uptime": None, "pid": "", "runningFile": "", "activeFile": "", "activeLine": "",
+           "suggested": kv.get("SUGGESTED_NAME", ""), "append": kv.get("APPEND_NAME", ""), "branch": kv.get("LOCAL_BRANCH", ""),
+           "missingDir": kv.get("MISSING_DIR", "")}
+    m = re.match(r"^(\S+) \(line (\d+)\)$", kv.get("ACTIVE_JAR", ""))
+    if m:
+        out["activeFile"], out["activeLine"] = m.group(1).rsplit("/", 1)[-1], m.group(2)
+    r = kv.get("RUNNING", "")
+    if r.startswith("yes"):
+        out["running"] = "yes"
+        f = dict(x.split("=", 1) for x in r.split()[1:] if "=" in x)
+        out["pid"] = f.get("PID", "")
+        try:
+            out["uptime"] = seconds_of(f.get("UPTIME", ""))
+        except ValueError:
+            pass
+        out["runningFile"] = kv.get("RUNNING_JAR", "").rsplit("/", 1)[-1]
+    elif r.startswith("no"):
+        out["running"] = "no"
+    return out
+
+
+def overview(_=None):
+    """Sign in to each server once, then read every app's state side by side."""
+    t, tid, _local = chosen()
+    servers = {}
+    for sid in T.used_servers(t):
+        rc, lines = helper(["ping", sid], 70)
+        text = next((l for l in lines if l.startswith("connected as")), "")
+        servers[sid] = {"ok": rc == 0 and bool(text), "text": text or error_of(lines, "could not sign in")}
+    apps = [a for a in t.get("apps") or [] if isinstance(a, dict) and a.get("id")]
+    live = [a["id"] for a in apps if servers.get(a.get("server"), {}).get("ok")]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        states = list(pool.map(current, live))
+    return {"servers": servers, "apps": {s["app"]: s for s in states}}
+
+
+def app_log(query):
+    app_id = (query.get("app") or [""])[0]
+    app_of(app_id)
+    try:
+        n = max(20, min(int((query.get("n") or ["200"])[0]), 1000))
+    except ValueError:
+        n = 200
+    rc, lines = helper(["log", app_id, str(n)], 60)
+    if rc != 0:
+        raise ApiError(502, error_of(lines, "Could not read the log."))
+    return {"lines": lines, "at": now_ms()}
+
+
+def activity(_=None):
+    """The audit log of the chosen template, newest first; each change joined with its exit status."""
+    _t, tid, _local = chosen()
+    try:
+        raw = (T.STATE_DIR / "audit.log").read_text(errors="replace").splitlines()[-1500:]
+    except OSError:
+        raw = []
+    rows = []
+    for line in raw:
+        parts = [p.strip() for p in line.split(" | ")]
+        if len(parts) < 4:
+            continue
+        when, user, target, action = parts[:4]
+        rest = parts[4:]
+        scope, _, app = target.partition("/")
+        if scope not in (tid, "-"):
+            continue
+        if rest and re.fullmatch(r"exit \d+", rest[-1]):
+            for r in reversed(rows):
+                if r["app"] == app and r["action"] == action and r["exit"] is None:
+                    r["exit"] = int(rest[-1][5:])
+                    break
+            continue
+        row = {"time": when, "user": user, "app": "" if app in ("", "-") else app, "action": action,
+               "detail": L.mask_text(" | ".join(rest))[:400], "exit": None}
+        if action == "restart" and rest:
+            row["exit"] = 0 if rest[0] == "ok" else 1
+            row["detail"] = " ".join(x for x in rest[1:] if x != "-")
+        rows.append(row)
+    return {"rows": rows[-250:][::-1]}
+
+
+# ---------------------------------------------------------------- operations
+
+
+class Op:
+    """One deploy, restart or rollback of one app: its stations, its output, and where it stands."""
+
+    def __init__(self, kind, app, view, route, name=""):
+        self.id = time.strftime("%H%M%S-") + secrets.token_hex(3)
+        self.kind, self.app, self.label, self.name = kind, app, view["name"], name
+        self.target, self.repo = view["target"], view["repo"]
+        self.stations = [dict(s, status="pending", note="", t0=None, t1=None) for s in route]
+        self.state = "running"      # running, awaiting (your approval), done, failed, cancelled
+        self.phase = "prepare"      # prepare: nothing on UAT changes; change: after approval
+        self.lines = collections.deque()
+        self.n = 0
+        self.plan = None
+        self.result = {}
+        self.error = ""
+        self.failed_at = ""
+        self.facts = []             # what is true on UAT after a failure
+        self.can_rollback = False
+        self.rolled_back = False
+        self.dismissed = False
+        self.started, self.ended = now_ms(), None
+        self.proc = None
+        self.cancelled = False
+        self.cfg, self.text, self.session, self.question = "", "", "", ""
+        self.info, self.plan2 = {}, None
+        self.can_revert, self.reverted, self.restarted = False, False, []
+
+    def station(self, key):
+        return next(s for s in self.stations if s["key"] == key)
+
+    def mark(self, key, status, note=None):
+        with App.lock:
+            s = self.station(key)
+            if status == "running" and s["t0"] is None:
+                s["t0"] = now_ms()
+            if status in ("done", "failed", "skipped"):
+                s["t0"] = s["t0"] or now_ms()
+                s["t1"] = now_ms()
+            s["status"] = status
+            if note is not None:
+                s["note"] = note
+            App.lock.notify_all()
+
+    def say(self, key, text, raw=False):
+        with App.lock:
+            self.n += 1
+            self.lines.append({"n": self.n, "st": key, "t": L.mask_text(text)[:600], "raw": raw})
+            while len(self.lines) > MAX_LINES:
+                self.lines.popleft()
+            App.lock.notify_all()
+
+    def view(self, since=0):
+        return {"id": self.id, "kind": self.kind, "app": self.app, "label": self.label, "name": self.name, "state": self.state,
+                "phase": self.phase, "stations": self.stations, "plan": self.plan, "result": self.result, "error": self.error,
+                "failedAt": self.failed_at, "facts": self.facts, "canRollback": self.can_rollback and not self.rolled_back,
+                "rolledBack": self.rolled_back, "started": self.started, "ended": self.ended, "n": self.n,
+                "cfg": self.cfg, "text": self.text, "question": self.question, "plan2": self.plan2,
+                "canRevert": self.can_revert and not self.reverted, "reverted": self.reverted,
+                "lines": [l for l in self.lines if l["n"] > since]}
+
+
+def run_helper(op, args, on_line, timeout):
+    """Run scripts/uat, handing each output line to on_line; the exit status (130 when cancelled)."""
+    proc = subprocess.Popen([str(UAT), *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, errors="replace", start_new_session=True)
+    op.proc = proc
+    timer = threading.Timer(timeout, lambda: os.killpg(proc.pid, signal.SIGTERM))
+    timer.daemon = True
+    timer.start()
+    try:
+        for line in proc.stdout:
+            on_line(line.rstrip("\n"))
+        rc = proc.wait()
+    finally:
+        timer.cancel()
+        op.proc = None
+    return 130 if op.cancelled else rc
+
+
+def tail_file(path, op, key, stop):
+    """Follow a growing file (the build log) into the operation's output."""
+    pos, buf = 0, ""
+    while True:
+        last = stop.is_set()
+        try:
+            with open(path, errors="replace") as f:
+                f.seek(pos)
+                buf += f.read()
+                pos = f.tell()
+        except OSError:
+            pass
+        *lines, buf = buf.split("\n")
+        for line in lines[-400:]:
+            if line.strip():
+                op.say(key, line, raw=True)
+        if last:
+            return
+        stop.wait(0.5)
+
+
+def fail(op, key, reason, lines):
+    if op.cancelled:
+        op.mark(key, "failed", "cancelled")
+        return finish(op, "cancelled")
+    op.mark(key, "failed", reason)
+    op.error, op.failed_at = reason, key
+    for s in op.stations:
+        if s["status"] == "pending":
+            s["status"] = "skipped"
+    finish(op, "failed")
+
+
+def finish(op, how):
+    with App.lock:
+        op.state, op.ended = how, now_ms()
+        for a, oid in list(App.busy_apps.items()):
+            if oid == op.id:
+                del App.busy_apps[a]
+        for repo, oid in list(App.busy_repos.items()):
+            if oid == op.id:
+                del App.busy_repos[repo]
+        if how != "cancelled":
+            post(report(op))
+        App.lock.notify_all()
+
+
+def post(text):
+    """Queue something for uat console --wait. Call with App.lock held."""
+    App.seq += 1
+    App.outbox.append({"seq": App.seq, "text": text})
+    del App.outbox[:-40]
+    App.lock.notify_all()
+
+
+def stepper(op, keys):
+    """An on_line that walks the stations named in keys as the helper prints its [i/n] step lines."""
+    box = {"key": None, "lines": []}
+
+    def on_line(line):
+        box["lines"].append(line)
+        m = STEP_RE.match(line)
+        if m and int(m.group(1)) <= len(keys):
+            if box["key"]:
+                op.mark(box["key"], "done")
+            box["key"] = keys[int(m.group(1)) - 1]
+            op.mark(box["key"], "running")
+            return
+        if not line.strip() or box["key"] is None:
+            return
+        op.say(box["key"], line)
+        if not line.startswith(("ERROR:", "---")):
+            op.mark(box["key"], "running", line[:300])
+
+    return box, on_line
+
+
+def fmt_span(ms):
+    s = round(ms / 1000)
+    return f"{s // 60}m {s % 60:02d}s" if s >= 60 else f"{s}s"
+
+
+def prepare(op, view):
+    """Build, rename and check: nothing on UAT changes. Ends waiting for approval, or failed."""
+    app, name = op.app, op.name
+    op.mark("name", "done", name)
+    before = current(app)
+    # build
+    op.mark("build", "running")
+    stop = threading.Event()
+    log = T.CACHE_DIR / "templates" / view["tid"] / app / "build.log"
+    try:
+        log.unlink()
+    except OSError:
+        pass
+    tail = threading.Thread(target=tail_file, args=(log, op, "build", stop), daemon=True)
+    tail.start()
+    out = []
+    rc = run_helper(op, ["build", app], out.append, 3600)
+    stop.set()
+    tail.join(timeout=3)
+    kv = dict(l.split("=", 1) for l in out if re.match(r"^[A-Z_]+=", l))
+    if op.cancelled:
+        op.mark("build", "failed", "cancelled")
+        return finish(op, "cancelled")
+    if rc != 0:
+        for l in out:
+            if l.strip() and not re.match(r"^(SOURCE|UNCOMMITTED_FILES|BUILD)=", l):
+                op.say("build", l)
+        return fail(op, "build", error_of(out, f"the build failed (exit {rc})"), out)
+    source = kv.get("SOURCE", "")
+    dirty = int(kv.get("UNCOMMITTED_FILES", "0") or 0)
+    took = fmt_span(now_ms() - op.station("build")["t0"])
+    op.mark("build", "done", f"{source or 'built'}{f', {dirty} uncommitted file(s)' if dirty else ''}, in {took}")
+    # rename
+    op.mark("rename", "running")
+    out = []
+    rc = run_helper(op, ["rename", app, name], out.append, 120)
+    kv = dict(l.split("=", 1) for l in out if re.match(r"^[A-Z_0-9]+=", l))
+    if rc != 0:
+        return fail(op, "rename", error_of(out, "the built file could not be renamed"), out)
+    op.mark("rename", "done", kv.get("RENAMED") or f"already named {name}")
+    # check
+    op.mark("check", "running")
+    out = []
+    rc = run_helper(op, ["preflight", app, name], out.append, 300)
+    checks, diff, steps, rollback, upload, mode, section = [], [], [], [], "", "", ""
+    for l in out:
+        m = CHECK_RE.match(l)
+        if l.startswith("START SCRIPT CHANGE"):
+            section, mode = "diff", (re.search(r"\((\w+) mode\)", l) or [None, ""])[1]
+        elif l.startswith("VERDICT="):
+            section = ""
+        elif m:
+            checks.append({"s": m.group(1), "t": m.group(2)})
+        elif section == "diff" and l[:1] in ("+", "-", " ", "@") and not l.startswith(("+++", "---")):
+            diff.append(l)
+        elif l.startswith("UPLOAD  "):
+            upload = l[8:].strip()
+        elif re.match(r"^STEP \d+  ", l):
+            steps.append(l.split("  ", 1)[1])
+        elif re.match(r"^ROLLBACK \d+  ", l):
+            rollback.append(l.split("  ", 1)[1])
+    for c in checks:
+        op.say("check", f"{c['s']}  {c['t']}")
+    fails = [c for c in checks if c["s"] == "FAIL"]
+    if rc != 0 or not any(l == "VERDICT=READY" for l in out):
+        reason = fails[0]["t"] if len(fails) == 1 else f"{len(fails)} checks failed" if fails else error_of(out, "UAT is not ready for this deploy")
+        return fail(op, "check", reason, out)
+    warns = sum(1 for c in checks if c["s"] == "WARN")
+    op.mark("check", "done", f"{sum(1 for c in checks if c['s'] == 'PASS')} checks pass" + (f", {warns} to read" if warns else ""))
+    plan = {"app": app, "label": op.label, "target": op.target, "server": view["server"], "name": name, "size": kv.get("SIZE", ""),
+            "sha": kv.get("SHA256", "")[:12], "source": source, "dirty": dirty, "style": view["style"],
+            "replaces": before.get("activeFile") or before.get("runningFile") or "", "running": before.get("running"),
+            "uptime": before.get("uptime"), "checks": checks, "diff": diff, "editMode": mode, "startScript": view["startScript"],
+            "upload": upload, "steps": steps, "rollback": rollback, "ready": view["ready"],
+            "route": [s["label"] for s in op.stations if s["zone"] != "local" and s["key"] not in ("check", "gate")]}
+    plan["digest"] = hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()[:16]
+    with App.lock:
+        if op.cancelled:
+            return finish(op, "cancelled")
+        op.plan, op.state = plan, "awaiting"
+        op.mark("gate", "running")
+
+
+def restart_part(op, app=None, prefix=""):
+    """Stop, start and wait until ready (of another app too, for a config change). True when the app came up."""
+    app = app or op.app
+    if app != op.app:
+        with App.lock:
+            other = App.ops.get(App.busy_apps.get(app))
+            if other and other.id != op.id:
+                fail(op, prefix + "stop", f"{app} has an operation running ({other.kind}); restart it when that is done", [])
+                return False
+            App.busy_apps[app] = op.id
+    box, on_line = stepper(op, [prefix + "stop", prefix + "start", prefix + "ready"])
+    rc = run_helper(op, ["restart", app], on_line, 3600)
+    if rc == 0:
+        ready = next((l for l in reversed(box["lines"]) if re.match(r"^\d+s: ", l)), "")
+        op.mark(box["key"] or prefix + "ready", "done", ready or "ready")
+        op.result["ready"] = ready
+        return True
+    key = box["key"] or prefix + "stop"
+    after = current(app)
+    op.facts.append(["App" if app == op.app else app, "running " + (after["runningFile"] or "") if after["running"] == "yes" else
+                     "not running" if after["running"] == "no" else "state unknown"])
+    fail(op, key, error_of(box["lines"], "the restart failed"), box["lines"])
+    return False
+
+
+def change(op, view):
+    """After approval: upload and switch (deploy), restore (rollback), then restart."""
+    op.phase = "change"
+    if op.kind == "deploy":
+        op.mark("gate", "done", "approved")
+        keys = [s["key"] for s in op.stations if s["key"] not in ("name", "build", "rename", "check", "gate", "stop", "start", "ready")]
+        box, on_line = stepper(op, keys)
+        rc = run_helper(op, ["push", op.app], on_line, 1800)
+        if rc != 0:
+            done = {s["key"] for s in op.stations if s["status"] == "done"}
+            if view["style"] == "jar-start-script":
+                op.facts = [["New file", "copied to the app folder" if "copy" in done else "may be partly copied"],
+                            ["Start script", "may be changed; a backup exists" if "backup" in done else "untouched"],
+                            ["App", "not restarted; it still runs what it ran before"]]
+                op.can_rollback = "backup" in done
+            else:
+                op.facts = [["New file", "uploaded" if "copy" in done else "may be partly uploaded"],
+                            ["Steps", f"{sum(1 for k in done if k.startswith('step'))} of {len(keys) - 1} ran"],
+                            ["App", "not restarted"]]
+                op.can_rollback = view["hasRollback"] and "copy" in done
+            return fail(op, box["key"] or keys[0], error_of(box["lines"], "the upload failed"), box["lines"])
+        op.mark(box["key"], "done", f"the next start runs {op.name}" if view["style"] == "jar-start-script" else None)
+        op.can_rollback = view["hasRollback"]
+        op.facts = [["New file", "on the server"], ["Switch", "done: the next start runs the new file"]]
+    elif op.kind == "rollback":
+        keys = [s["key"] for s in op.stations if s["key"] not in ("stop", "start", "ready")]
+        box, on_line = stepper(op, keys)
+        op.mark(keys[0], "running")
+        box["key"] = keys[0]
+        rc = run_helper(op, ["rollback", op.app], on_line, 900)
+        if rc != 0:
+            return fail(op, box["key"], error_of(box["lines"], "the rollback failed"), box["lines"])
+        op.mark(box["key"], "done", next((l for l in reversed(box["lines"]) if l.startswith("ROLLED BACK")), "")[:300] or None)
+    if restart_part(op):
+        after = current(op.app)
+        op.result.update(file=after.get("runningFile") or after.get("activeFile") or op.name, total=fmt_span(now_ms() - op.started))
+        op.facts = []
+        finish(op, "done")
+
+
+def report(op):
+    """What uat console --wait tells Claude about a finished operation."""
+    head = f"RESULT {op.kind} {op.app} ({op.label}): "
+    out = []
+    if op.state == "done":
+        out.append(head + "OK")
+        if op.kind == "deploy" and op.plan:
+            p = op.plan
+            out.append(f"  file      {p['name']}  {p['size']}  sha256 {p['sha']}  built from {p['source']}"
+                       + (f"  [{p['dirty']} uncommitted files]" if p["dirty"] else ""))
+            out.append(f"  replaced  {p['replaces'] or 'nothing recorded'}")
+        if op.kind in CONFIG_KINDS:
+            r = op.result
+            if r.get("nothing"):
+                out.append(f"  nothing changed: {r['nothing']}")
+                return "\n".join(out)
+            for k, v in (("change", r.get("summary")), ("file", r.get("path")), ("commit", r.get("commit")),
+                         ("served", r.get("served")), ("restarted", ", ".join(r.get("restarted") or [])),
+                         ("not restarted", ", ".join(r.get("notRestarted") or [])), ("total", r.get("total"))):
+                if v:
+                    out.append(f"  {k:<13} {v}")
+            return "\n".join(out)
+        if op.result.get("file"):
+            out.append(f"  running   {op.result['file']}")
+        out.append(f"  ready     {op.result.get('ready') or 'yes'}")
+        out.append(f"  total     {op.result.get('total', '')}")
+        return "\n".join(out)
+    st = next((s for s in op.stations if s["key"] == op.failed_at), {"label": op.failed_at})
+    out.append(head + f"FAILED at \"{st['label']}\"" + (" (before approval: nothing on UAT changed)" if op.phase == "prepare" else ""))
+    out.append(f"  reason    {op.error}")
+    for k, v in op.facts:
+        out.append(f"  on UAT    {k}: {v}")
+    if op.kind == "config" and op.phase == "change":
+        out.append("  revert    " + ("offered on the page; not run" if op.can_revert else "none available; undo by hand"))
+    if op.phase == "change" and op.kind == "deploy":
+        out.append("  rollback  " + ("offered on the page (Roll back / Leave as is); not run" if op.can_rollback else "none available; undo by hand"))
+    tail = [l["t"] for l in op.lines if l["st"] == op.failed_at][-40:]
+    if tail:
+        out.append("  output of the failed step (last lines)")
+        out.extend("    " + t for t in tail)
+    return "\n".join(out)
+
+
+def claim(app, repo, op):
+    with App.lock:
+        if app in App.busy_apps:
+            raise ApiError(409, "This app already has an operation running.")
+        if repo and repo in App.busy_repos:
+            other = App.ops[App.busy_repos[repo]]
+            raise ApiError(409, f"{other.label} is building from the same local repo. Start this one when that build is done.")
+        family = CONFIG_KINDS if op.kind in CONFIG_KINDS else DEPLOY_KINDS
+        for o in App.ops.values():
+            if o.app == app and o.kind in family:
+                o.dismissed = True
+        App.busy_apps[app] = op.id
+        if repo:
+            App.busy_repos[repo] = op.id
+        App.ops[op.id] = op
+        for old in sorted(App.ops.values(), key=lambda o: o.started)[:-30]:
+            if old.state in ("done", "failed", "cancelled"):
+                del App.ops[old.id]
+
+
+def guarded(op, fn, *args):
+    def run():
+        try:
+            fn(op, *args)
+        except Exception as e:  # a bug here must not leave the app locked
+            if op.state in ("running", "awaiting"):
+                fail(op, next((s["key"] for s in op.stations if s["status"] == "running"), op.stations[0]["key"]),
+                     f"the console hit an error: {e}", [])
+    threading.Thread(target=run, daemon=True).start()
+
+
+def full_view(app_id):
+    t, tid, local, a = app_of(app_id)
+    v = app_view(t, tid, local, a)
+    v["tid"] = tid
+    return t, a, v
+
+
+def start_deploy(body):
+    _t, _a, v = full_view(body.get("app"))
+    name = body.get("name")
+    if v["style"] == "none":
+        raise ApiError(400, f"{v['name']} is restart only in the template.")
+    if v["blocked"]:
+        raise ApiError(409, v["blocked"])
+    if not isinstance(name, str) or not NAME_RE.match(name) or not name.endswith(v["ext"] or ""):
+        raise ApiError(400, f"Use letters, digits, . _ - and end the name in {v['ext'] or 'the file extension'}.")
+    op = Op("deploy", v["id"], v, v["route"], name)
+    claim(v["id"], v["repo"], op)
+    guarded(op, prepare, v)
+    return {"op": op.id}
+
+
+def approve(body):
+    op = App.ops.get(body.get("op"))
+    if not op:
+        raise ApiError(404, "That operation is no longer here.")
+    _t, _a, v = full_view(op.app)
+    with App.lock:
+        if op.state != "awaiting" or not op.plan or body.get("digest") != op.plan["digest"]:
+            raise ApiError(409, "The plan on this page is out of date. Reload it, read it again, then approve.")
+        op.state = "running"
+    T.audit(f"{v['tid']}/{op.app}", f"approved on the console page | {op.kind} {op.name}".rstrip())
+    guarded(op, change, v)
+    return {"ok": True}
+
+
+def restart_plan(v, cur):
+    return {"app": v["id"], "label": v["name"], "target": v["target"], "server": v["server"], "stop": v["stop"], "start": v["start"],
+            "ready": v["ready"], "running": cur.get("running"), "uptime": cur.get("uptime"), "file": cur.get("runningFile") or cur.get("activeFile")}
+
+
+def start_simple(body, kind):
+    """A restart, or the rollback of a deploy: the plan is shown first and waits for approval like a deploy."""
+    if kind == "rollback":
+        src = App.ops.get(body.get("op"))
+        if not src or not src.can_rollback or src.rolled_back or src.state not in ("failed", "done"):
+            raise ApiError(409, "There is nothing to roll back here.")
+        app_id = src.app
+    else:
+        src, app_id = None, body.get("app")
+    t, a, v = full_view(app_id)
+    route = [{"key": "gate", "zone": "gate", "label": "Your approval", "what": ""}]
+    route += (rollback_route(a) if kind == "rollback" else []) + restart_route(t, a)
+    op = Op(kind, v["id"], v, route, src.name if src else "")
+    claim(v["id"], "", op)
+    op.source = src
+    cur = current(v["id"])
+    plan = restart_plan(v, cur)
+    if kind == "rollback":
+        plan["undo"] = src.name
+        plan["steps"] = [s["what"] for s in rollback_route(a)] if v["style"] == "custom" else []
+        plan["style"] = v["style"]
+        plan["startScript"] = v["startScript"]
+    plan["digest"] = hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()[:16]
+    with App.lock:
+        op.plan, op.state = plan, "awaiting"
+        op.mark("gate", "running")
+    return {"op": op.id}
+
+
+def approve_simple(op, v):
+    op.phase = "change"
+    op.mark("gate", "done", "approved")
+    if op.kind == "rollback":
+        change(op, v)
+        if op.state == "done" and getattr(op, "source", None):
+            op.source.rolled_back = True
+        return
+    if restart_part(op):
+        after = current(op.app)
+        op.result.update(file=after.get("runningFile") or after.get("activeFile") or "", total=fmt_span(now_ms() - op.started))
+        finish(op, "done")
+
+
+def approve_any(body):
+    op = App.ops.get(body.get("op"))
+    if op and op.kind in CONFIG_KINDS:
+        _t, _a, v = full_view(op.app)
+        with App.lock:
+            if op.state != "awaiting" or op.phase != "prepare" or not op.plan or body.get("digest") != op.plan["digest"]:
+                raise ApiError(409, "The plan on this page is out of date. Reload it, read it again, then approve.")
+            op.state = "running"
+        T.audit(f"{v['tid']}/{op.app}", f"approved on the console page | {op.kind} {op.cfg} {op.plan.get('message', '')}".rstrip())
+        guarded(op, config_change if op.kind == "config" else config_revert_run, v)
+        return {"ok": True}
+    if op and op.kind in ("restart", "rollback"):
+        _t, _a, v = full_view(op.app)
+        with App.lock:
+            if op.state != "awaiting" or body.get("digest") != op.plan["digest"]:
+                raise ApiError(409, "The plan on this page is out of date. Reload it, read it again, then approve.")
+            op.state = "running"
+        T.audit(f"{v['tid']}/{op.app}", f"approved on the console page | {op.kind} {op.name}".rstrip())
+        guarded(op, approve_simple, v)
+        return {"ok": True}
+    return approve(body)
+
+
+def cancel(body):
+    op = App.ops.get(body.get("op"))
+    if not op:
+        raise ApiError(404, "That operation is no longer here.")
+    with App.lock:
+        if op.phase != "prepare":
+            raise ApiError(409, "This operation is already changing UAT; it runs to the end so the server is not left half way.")
+        if op.state in ("awaiting", "asking"):
+            if op.kind == "config":
+                for k in ("edit", "diff"):
+                    if op.station(k)["status"] in ("running", "pending"):
+                        op.station(k)["status"] = "skipped"
+            op.mark("gate", "skipped", "cancelled")
+            for s in op.stations:
+                if s["status"] == "pending":
+                    s["status"] = "skipped"
+            op.dismissed = op.kind != "deploy"
+            finish(op, "cancelled")
+            return {"ok": True}
+        if op.state != "running":
+            return {"ok": True}
+        op.cancelled = True
+        proc = op.proc
+    if proc:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except OSError:
+            pass
+    return {"ok": True}
+
+
+def dismiss(body):
+    op = App.ops.get(body.get("op"))
+    if op and op.state in ("done", "failed", "cancelled"):
+        op.dismissed = True
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- headless Claude: questions and config edits
+
+
+def claude_run(prompt, allowed, on_event, tools="Bash,Read,Grep", resume="", schema=None, add_dirs=(), holder=None, timeout=900):
+    """Run headless Claude Code with only the listed tools allowed. Returns {text, data, session, error}."""
+    if not CLAUDE:
+        return {"text": "", "data": None, "session": resume, "error": "Claude Code (the claude command) is not on this machine's PATH."}
+    T.CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cmd = [CLAUDE, "-p", "--model", MODEL, "--tools", tools, "--permission-mode", "dontAsk", "--disable-slash-commands",
+           "--strict-mcp-config", "--max-budget-usd", BUDGET, "--output-format", "stream-json", "--verbose"]
+    if resume:
+        cmd += ["--resume", resume]
+    if schema:
+        cmd += ["--json-schema", json.dumps(schema)]
+    for d in add_dirs:
+        cmd += ["--add-dir", d]
+    cmd += ["--allowedTools", *allowed]
+    err = tempfile.TemporaryFile()
+    proc = subprocess.Popen(cmd, cwd=T.CACHE_DIR, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err, text=True,
+                            errors="replace", start_new_session=True)
+    if holder is not None:
+        holder.proc = proc
+    timer = threading.Timer(timeout, lambda: os.killpg(proc.pid, signal.SIGTERM))
+    timer.daemon = True
+    timer.start()
+    out = {"text": "", "data": None, "session": resume, "error": ""}
+    try:
+        proc.stdin.write(prompt)
+        proc.stdin.close()
+        for line in proc.stdout:
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            kind = ev.get("type")
+            if ev.get("session_id"):
+                out["session"] = ev["session_id"]
+            if kind == "assistant":
+                for c in (ev.get("message") or {}).get("content") or []:
+                    if c.get("type") == "tool_use" and c.get("name") != "StructuredOutput":
+                        i = c.get("input") or {}
+                        what = i.get("command") or f"{c.get('name')} {i.get('file_path') or i.get('pattern') or ''}".strip()
+                        on_event("tool", L.mask_text(what.replace(str(UAT), "uat").replace(str(T.CACHE_DIR), "~/.cache/uat-deploy"))[:400], c.get("id"))
+                    elif c.get("type") == "text" and (c.get("text") or "").strip():
+                        on_event("text", L.mask_text(c["text"].strip())[:1200], None)
+            elif kind == "user":
+                for c in (ev.get("message") or {}).get("content") or []:
+                    if isinstance(c, dict) and c.get("type") == "tool_result":
+                        body = c.get("content")
+                        if isinstance(body, list):
+                            body = "\n".join(x.get("text", "") for x in body if isinstance(x, dict))
+                        on_event("output", L.mask_text(str(body or "")).replace(str(UAT), "uat")[:6000],
+                                 (c.get("tool_use_id"), bool(c.get("is_error"))))
+            elif kind == "result":
+                out["text"] = L.mask_text(ev.get("result") or "")
+                out["data"] = ev.get("structured_output")
+                if ev.get("is_error"):
+                    out["error"] = out["text"] or f"Claude stopped: {ev.get('subtype') or 'error'}"
+        rc = proc.wait()
+    finally:
+        timer.cancel()
+        if holder is not None:
+            holder.proc = None
+    if rc != 0 and not out["error"] and not out["text"] and out["data"] is None:
+        err.seek(0)
+        last = [l for l in err.read().decode(errors="replace").splitlines() if l.strip()]
+        out["error"] = (last[-1] if last else f"Claude Code stopped (exit {rc})")[:400]
+    return out
+
+
+def project_knowledge():
+    rc, lines = helper(["instructions"], 30)
+    rc2, apps = helper(["apps"], 30)
+    return "\n".join(lines) if rc == 0 else "(none)", "\n".join(apps) if rc2 == 0 else "(none)"
+
+
+ASK_FILE = RUN / "ask.json"
+ASK_SCHEMA = {"type": "object", "required": ["answer"], "properties": {
+    "answer": {"type": "string"},
+    "followups": {"type": "array", "maxItems": 3, "items": {"type": "string"}},
+    "actions": {"type": "array", "maxItems": 3, "items": {"type": "object", "required": ["kind", "app"], "properties": {
+        "kind": {"type": "string", "enum": ["restart", "deploy", "config", "log"]}, "app": {"type": "string"},
+        "label": {"type": "string"}, "request": {"type": "string"}}}}}}
+DEFAULT_SAVED = ["What is using the disk, largest first?", "What uses the most memory?", "Which ports are listening, and which process owns each?",
+                 "What are the latest errors in this app's log?", "Find ___ in every app's log and show the lines in time order",
+                 "Did anything restart or crash in the last 24 hours?"]
+
+
+class Ask:
+    """Ask UAT: conversations with the read-only commands Claude ran, their output, and its answers. Kept on disk."""
+    threads = []     # newest first: {id, title, session, created, updated, items: [...]}
+    saved = None     # the user's saved questions
+    proc = None
+    loaded = False
+
+
+def ask_load():
+    if Ask.loaded:
+        return
+    Ask.loaded = True
+    try:
+        data = json.loads(ASK_FILE.read_text())
+        Ask.threads = [t for t in data.get("threads") or [] if isinstance(t, dict) and t.get("id")]
+        Ask.saved = data.get("saved") if isinstance(data.get("saved"), list) else None
+        for t in Ask.threads:
+            for i in t.get("items") or []:
+                if i.get("state") == "running":
+                    i.update(state="cancelled")
+    except (OSError, ValueError):
+        pass
+    if Ask.saved is None:
+        Ask.saved = list(DEFAULT_SAVED)
+
+
+def ask_store():
+    """Call with App.lock held."""
+    T.write_atomic(ASK_FILE, json.dumps({"threads": Ask.threads[:30], "saved": Ask.saved}), 0o600)
+
+
+def ask_thread(tid):
+    return next((t for t in Ask.threads if t["id"] == tid), None)
+
+
+ASK_ALLOWED = ([f"Bash({UAT} {c} *)" for c in ("read", "log", "get", "current", "detect", "instructions")]
+               + [f"Bash({UAT} {c})" for c in ("ping", "check-paths", "apps", "show", "instructions")])
+
+
+def ask_start(body):
+    text, app_id = body.get("text"), body.get("app") or ""
+    if not isinstance(text, str) or not text.strip() or len(text) > 6000:
+        raise ApiError(400, "Type a question.")
+    if app_id:
+        app_of(app_id)
+    if not CLAUDE:
+        raise ApiError(409, "Claude Code (the claude command) is not on this machine's PATH, so questions cannot be answered here.")
+    _t, tid, _l = chosen()
+    with App.lock:
+        ask_load()
+        if any(i["state"] == "running" for t in Ask.threads for i in t["items"]):
+            raise ApiError(409, "Claude is still answering another question. Wait for it, or stop it.")
+        thread = ask_thread(body.get("thread"))
+        if not thread or thread.get("template") != tid:
+            first = text.strip().splitlines()[0]
+            thread = {"id": secrets.token_hex(4), "title": first[:90], "template": tid, "session": "", "created": now_ms(), "items": []}
+        else:
+            Ask.threads.remove(thread)
+        Ask.threads.insert(0, thread)
+        item = {"id": len(thread["items"]) + 1, "q": text.strip(), "app": app_id, "at": now_ms(), "state": "running", "steps": [],
+                "answer": "", "followups": [], "actions": [], "error": "", "ended": None}
+        thread["items"].append(item)
+        thread["updated"] = now_ms()
+        del thread["items"][:-40]
+        ask_store()
+
+    def run():
+        question = f"Question{f' (about the app {app_id})' if app_id else ''}: {item['q']}"
+        if thread["session"]:
+            prompt = question
+        else:
+            knowledge, apps = project_knowledge()
+            prompt = ((PROMPTS / "ask.md").read_text().replace("{uat}", str(UAT)).replace("{instructions}", knowledge)
+                      .replace("{apps}", apps) + "\n\n" + question)
+
+        def on_event(kind, text, ref):
+            with App.lock:
+                if kind == "tool":
+                    item["steps"].append({"ref": ref, "cmd": text, "out": None, "ok": True, "at": now_ms(), "took": None})
+                elif kind == "output":
+                    st = next((x for x in item["steps"] if x.get("ref") == ref[0]), None)
+                    if st:
+                        st.update(out=text, ok=not ref[1], took=now_ms() - st["at"])
+                elif kind == "text":
+                    item["steps"].append({"say": text, "at": now_ms()})
+
+        try:
+            res = claude_run(prompt, ASK_ALLOWED, on_event, resume=thread["session"], schema=ASK_SCHEMA, holder=Ask)
+        except Exception as e:  # a bug here must not leave the question running for ever
+            res = {"text": "", "data": None, "session": thread["session"], "error": f"The console hit an error: {e}"}
+        data = res["data"]
+        if not isinstance(data, dict):
+            m = re.search(r"\{.*\}", res["text"] or "", re.S)
+            try:
+                data = json.loads(m.group(0)) if m and '"answer"' in m.group(0) else None
+            except ValueError:
+                data = None
+        with App.lock:
+            if item["state"] == "cancelled":
+                ask_store()
+                return
+            thread["session"] = res["session"] or thread["session"]
+            if isinstance(data, dict) and data.get("answer"):
+                ids = {a.get("id") for a in (chosen()[0].get("apps") or []) if isinstance(a, dict)}
+                item["answer"] = L.mask_text(str(data["answer"]))
+                item["followups"] = [str(x)[:200] for x in (data.get("followups") or []) if isinstance(x, str)][:3]
+                item["actions"] = [{"kind": a["kind"], "app": a["app"], "label": str(a.get("label") or "")[:80], "request": str(a.get("request") or "")[:1500]}
+                                   for a in (data.get("actions") or []) if isinstance(a, dict) and a.get("kind") in ("restart", "deploy", "config", "log")
+                                   and a.get("app") in ids][:3]
+            else:
+                item["answer"] = res["text"]
+            # the last narration repeats the answer; keep the commands and what was said between them
+            while item["steps"] and "say" in item["steps"][-1]:
+                item["steps"].pop()
+            item.update(state="failed" if res["error"] or not item["answer"] else "done",
+                        error=res["error"] or ("" if item["answer"] else "Claude returned no answer."), ended=now_ms())
+            thread["updated"] = now_ms()
+            ask_store()
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"thread": thread["id"]}
+
+
+def ask_view(query=None):
+    tid = ((query or {}).get("thread") or [""])[0]
+    _t, cur, _l = chosen()
+    with App.lock:
+        ask_load()
+        mine = [t for t in Ask.threads if t.get("template") == cur]
+        return {"threads": [{"id": t["id"], "title": t["title"], "updated": t.get("updated") or t["created"], "count": len(t["items"]),
+                             "running": any(i["state"] == "running" for i in t["items"])} for t in mine],
+                "thread": next((t for t in mine if t["id"] == tid), None), "saved": Ask.saved, "engine": bool(CLAUDE), "model": MODEL}
+
+
+def ask_stop(body):
+    with App.lock:
+        ask_load()
+        for t in Ask.threads:
+            for i in t["items"]:
+                if i["state"] == "running":
+                    i.update(state="cancelled", ended=now_ms())
+        proc = Ask.proc
+        ask_store()
+    if proc:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except OSError:
+            pass
+    return {"ok": True}
+
+
+def ask_delete(body):
+    with App.lock:
+        ask_load()
+        t = ask_thread(body.get("thread"))
+        if t and any(i["state"] == "running" for i in t["items"]):
+            raise ApiError(409, "Stop the running question first.")
+        if t:
+            Ask.threads.remove(t)
+            ask_store()
+    return {"ok": True}
+
+
+def ask_save(body):
+    text = body.get("text")
+    if not isinstance(text, str) or not text.strip() or len(text) > 400:
+        raise ApiError(400, "That question cannot be saved.")
+    text = " ".join(text.split())
+    with App.lock:
+        ask_load()
+        if body.get("remove"):
+            Ask.saved = [x for x in Ask.saved if x != text]
+        elif text not in Ask.saved:
+            Ask.saved = ([text] + Ask.saved)[:24]
+        ask_store()
+        return {"saved": Ask.saved}
+
+
+def vitals(_=None):
+    """Disk, memory, load and boot time of each server, read with one read-only command."""
+    t, _tid, _l = chosen()
+    out = {}
+    for sid in T.used_servers(t):
+        rc, lines = helper(["read", "--server", sid, "df -Pk /; free -m; cat /proc/loadavg; nproc; uptime -s"], 60)
+        v = {"ok": rc == 0, "error": "" if rc == 0 else error_of(lines, "could not read the server"), "at": now_ms()}
+        try:
+            for l in lines:
+                f = l.split()
+                if len(f) >= 6 and f[-1] == "/" and f[1].isdigit():
+                    v["disk"] = {"size": int(f[1]) * 1024, "free": int(f[3]) * 1024, "usedPct": int(f[4].rstrip("%"))}
+                elif f and f[0] == "Mem:" and len(f) >= 7:
+                    v["mem"] = {"total": int(f[1]) << 20, "available": int(f[6]) << 20, "usedPct": round(100 - 100 * int(f[6]) / max(int(f[1]), 1))}
+                elif f and f[0] == "Swap:" and len(f) >= 3 and int(f[1]):
+                    v["swap"] = {"total": int(f[1]) << 20, "used": int(f[2]) << 20}
+                elif len(f) == 5 and "/" in f[3] and f[4].isdigit():
+                    v["load"] = [float(x) for x in f[:3]]
+                elif len(f) == 1 and f[0].isdigit():
+                    v["cores"] = int(f[0])
+                elif re.match(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$", l.strip()):
+                    v["boot"] = l.strip()
+        except (ValueError, IndexError):
+            pass
+        out[sid] = v
+    return {"servers": out}
+
+
+# ---------------------------------------------------------------- config changes
+
+CFG_SCHEMA = {"type": "object", "required": ["status", "summary"], "properties": {
+    "status": {"type": "string", "enum": ["ready", "question", "nothing"]}, "summary": {"type": "string"},
+    "key": {"type": "string"}, "notes": {"type": "array", "items": {"type": "string"}}, "question": {"type": "string"}}}
+
+
+def app_name(t, app_id):
+    try:
+        return T.find_app(t, app_id).get("name") or app_id
+    except T.TemplateError:
+        return app_id
+
+
+def restart_stations(t, app_id, prefix):
+    name = app_name(t, app_id)
+    try:
+        a = T.find_app(t, app_id)
+        stop, start, ready = a.get("stop") or "", a.get("start") or "", ready_text(t, a)
+    except T.TemplateError:
+        stop = start = ready = ""
+    return [{"key": prefix + "stop", "zone": "change", "label": f"Stop {name}", "what": stop},
+            {"key": prefix + "start", "zone": "change", "label": f"Start {name}", "what": start},
+            {"key": prefix + "ready", "zone": "read", "label": f"Wait until {name} is ready", "what": ready}]
+
+
+def config_of(a, cfg_id):
+    c = next((c for c in a.get("configs") or [] if c.get("id") == cfg_id), None)
+    if not c:
+        raise ApiError(404, "This app has no such config file.")
+    return c
+
+
+def config_route(t, a, c, git_name):
+    served = c.get("served_by") or ""
+    others = [x for x in c.get("restart") or [] if x != served]
+    out = [{"key": "request", "zone": "local", "label": "Describe the change", "what": ""},
+           {"key": "pull", "zone": "read", "label": "Download the file from UAT", "what": c.get("path") or ""},
+           {"key": "edit", "zone": "local", "label": "Prepare the edit", "what": "Claude finds the key and edits the local copy"},
+           {"key": "diff", "zone": "local", "label": "Check the edit", "what": "syntax, duplicate keys, the exact diff"},
+           {"key": "gate", "zone": "gate", "label": "Your approval", "what": ""}]
+    if c.get("git_repo"):
+        out += [{"key": "upload", "zone": "change", "label": "Upload the file", "what": c.get("path") or ""},
+                {"key": "commit", "zone": "change", "label": f"Commit as {git_name or 'you'}", "what": c.get("git_repo")}]
+    else:
+        out += [{"key": "backup", "zone": "change", "label": "Back up the file", "what": f"{c.get('path')}.bak-<time>"},
+                {"key": "upload", "zone": "change", "label": "Upload the file", "what": c.get("path") or ""}]
+    if served:
+        out += restart_stations(t, served, "sv-")
+    if c.get("verify_url") and T.config_format(c) == "yaml":
+        out.append({"key": "verify", "zone": "read", "label": "Confirm the new values are served", "what": c["verify_url"]})
+    if others:
+        out.append({"key": "gate2", "zone": "gate", "label": "Restart now or later", "what": ""})
+        for i, x in enumerate(others):
+            out += restart_stations(t, x, f"r{i}-")
+    return out
+
+
+def start_config(body):
+    t, a, v = full_view(body.get("app"))
+    c = config_of(a, body.get("cfg"))
+    text = body.get("text")
+    if not isinstance(text, str) or not text.strip() or len(text) > 2000:
+        raise ApiError(400, "Describe what should change.")
+    if not CLAUDE:
+        raise ApiError(409, "Claude Code (the claude command) is not on this machine's PATH, so the edit cannot be prepared here.")
+    local = T.load_local()
+    git = local.get("git") or {}
+    if c.get("git_repo") and not (git.get("name") and git.get("email")):
+        raise ApiError(409, "Config commits need your git name and email. Set them under Templates, This machine.")
+    op = Op("config", v["id"], v, config_route(t, a, c, git.get("name")))
+    op.cfg, op.text = c["id"], " ".join(text.split())
+    served = c.get("served_by") or ""
+    op.info = {"path": c.get("path"), "format": T.config_format(c), "git": bool(c.get("git_repo")), "gitName": git.get("name") or "",
+               "served": served, "servedName": app_name(t, served) if served else "",
+               "verify": bool(c.get("verify_url")) and T.config_format(c) == "yaml",
+               "others": [x for x in c.get("restart") or [] if x != served],
+               "localDir": os.path.expanduser((T.local_template(local, v["tid"]).get("config_dir") or ""))}
+    op.info["otherNames"] = [app_name(t, x) for x in op.info["others"]]
+    claim(v["id"], "", op)
+    guarded(op, config_prepare, v, True)
+    return {"op": op.id}
+
+
+def config_prepare(op, view, first):
+    """Download the file and let Claude prepare the edit in the local copy. Nothing on UAT changes."""
+    info = op.info
+    if first:
+        op.mark("request", "done", op.text[:300])
+        op.mark("pull", "running")
+        out = []
+        rc = run_helper(op, ["config-pull", op.app, op.cfg], out.append, 300)
+        kv = dict(l.split("=", 1) for l in out if re.match(r"^[A-Z_]+=", l))
+        if rc != 0 or not kv.get("EDIT_COPY"):
+            for l in out:
+                if CHECK_RE.match(l):
+                    op.say("pull", l)
+            reason = next((CHECK_RE.match(l).group(2) for l in out if l.startswith("FAIL")), "") or error_of(out, "the file could not be downloaded")
+            return fail(op, "pull", reason, out)
+        info["edit"], info["orig"] = kv["EDIT_COPY"].strip(), kv.get("SERVER_COPY", "").split("   ")[0].strip()
+        head = kv.get("HEAD", "")
+        op.mark("pull", "done", f"{os.path.basename(info['edit'])}, {info['format']}" + (f", last commit {head}" if head else ""))
+        knowledge, _apps = project_knowledge()
+        prompt = (PROMPTS / "config.md").read_text()
+        for k, val in (("{uat}", str(UAT)), ("{edit}", info["edit"]), ("{orig}", info["orig"]), ("{format}", info["format"]),
+                       ("{path}", info["path"]), ("{app}", op.app), ("{cfg}", op.cfg), ("{instructions}", knowledge),
+                       ("{local_dir}", info["localDir"] or "(not set)")):
+            prompt = prompt.replace(k, val)
+        prompt += "\n\nThe request: " + op.text
+    else:
+        prompt = ("The user replied: " + op.reply + "\n\nContinue from there: adjust EDIT_COPY if needed, run config-diff, "
+                  "and finish with the result object.")
+    op.mark("edit", "running", "")
+    allowed = [f"Bash({UAT} yaml-find *)", f"Bash({UAT} yaml-check *)", f"Bash({UAT} config-diff {op.app} {op.cfg})",
+               f"Edit(/{info['edit']})"]
+    dirs = [info["localDir"]] if info["localDir"] and os.path.isdir(info["localDir"]) else []
+    res = claude_run(prompt, allowed, lambda kind, text, ref: kind != "output" and op.say("edit", ("$ " if kind == "tool" else "") + text, raw=kind == "tool"),
+                     tools="Bash,Read,Grep,Edit", resume=op.session, schema=CFG_SCHEMA, add_dirs=dirs, holder=op)
+    op.session = res["session"] or op.session
+    if op.cancelled:
+        op.mark("edit", "failed", "cancelled")
+        return finish(op, "cancelled")
+    data = res["data"]
+    if not isinstance(data, dict):
+        m = re.search(r"\{.*\}", res["text"] or "", re.S)
+        try:
+            data = json.loads(m.group(0)) if m else None
+        except ValueError:
+            data = None
+    if res["error"] or not isinstance(data, dict) or data.get("status") not in ("ready", "question", "nothing"):
+        return fail(op, "edit", res["error"] or "Claude did not return a result for this edit", [])
+    summary = L.mask_text(str(data.get("summary") or ""))[:600]
+    if data["status"] == "question":
+        return hold(op, L.mask_text(str(data.get("question") or summary))[:1200])
+    if data["status"] == "nothing":
+        op.mark("edit", "done", summary)
+        for s in op.stations:
+            if s["status"] == "pending":
+                s["status"] = "skipped"
+        op.result = {"nothing": summary}
+        return finish(op, "done")
+    op.mark("edit", "done", summary)
+    op.mark("diff", "running")
+    rc, lines = helper(["config-diff", op.app, op.cfg], 60)
+    if rc != 0 or not any(l.startswith("OK") for l in lines):
+        why = next((l for l in lines if l.startswith("FAIL")), "") or ("the edit changes nothing" if "NO CHANGES" in lines else error_of(lines, "the check did not pass"))
+        op.mark("diff", "pending", "")
+        return hold(op, f"The check of the edit did not pass: {why}. Say how to correct it, or cancel.")
+    diff, paths, section = [], [], ""
+    for l in lines:
+        if l.startswith("CHANGED PATHS"):
+            section = "paths"
+        elif section == "paths" and l.strip():
+            paths.append(l.strip())
+        elif not section and l[:1] in ("+", "-", " ", "@") and not l.startswith(("+++", "---")):
+            diff.append(l)
+    key = re.sub(r"[^\w .:/()\[\]-]", "", str(data.get("key") or "")).strip()[:60] or "config"
+    op.mark("diff", "done", f"{len([p for p in paths if not p.startswith('(')])} value(s) change, syntax ok")
+    plan = {"app": op.app, "label": op.label, "target": op.target, "server": view["server"], "path": info["path"],
+            "format": info["format"], "summary": summary, "notes": [L.mask_text(str(n))[:300] for n in (data.get("notes") or [])][:8],
+            "diff": diff[:400], "paths": paths[:60], "git": info["git"], "gitName": info["gitName"],
+            "message": f"{op.label} config: update {key}", "served": info["servedName"], "verify": info["verify"],
+            "others": info["otherNames"]}
+    plan["digest"] = hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()[:16]
+    with App.lock:
+        if op.cancelled:
+            return finish(op, "cancelled")
+        op.plan, op.state, op.question = plan, "awaiting", ""
+        op.mark("gate", "running")
+
+
+def hold(op, question):
+    """Wait for the user's reply to Claude's question."""
+    with App.lock:
+        op.question, op.state = question, "asking"
+        op.mark("edit", "running", "Claude needs an answer")
+
+
+def config_reply(body):
+    op = App.ops.get(body.get("op"))
+    text = body.get("text")
+    if not op or op.kind != "config":
+        raise ApiError(404, "That operation is no longer here.")
+    if not isinstance(text, str) or not text.strip() or len(text) > 2000:
+        raise ApiError(400, "Type a reply.")
+    _t, _a, v = full_view(op.app)
+    with App.lock:
+        if op.phase != "prepare" or op.state not in ("asking", "awaiting"):
+            raise ApiError(409, "The edit can no longer be changed.")
+        op.reply, op.state, op.plan, op.question = " ".join(text.split()), "running", None, ""
+        for k in ("diff", "gate"):
+            s = op.station(k)
+            s.update(status="pending", note="", t0=None, t1=None)
+        op.say("edit", "> " + op.reply)
+    guarded(op, config_prepare, v, False)
+    return {"ok": True}
+
+
+def config_result(op, **extra):
+    p = op.plan or {}
+    op.result.update(summary=p.get("summary"), path=p.get("path"), total=fmt_span(now_ms() - op.started), **extra)
+
+
+def config_change(op, view):
+    """After approval: upload and commit (or back up), restart the serving app, check the served values."""
+    op.phase = "change"
+    info = op.info
+    op.mark("gate", "done", "approved")
+    keys = ["upload", "commit"] if info["git"] else ["backup", "upload"]
+    box, on_line = stepper(op, keys)
+    rc = run_helper(op, ["config-push", op.app, op.cfg, op.plan["message"]], on_line, 900)
+    done = {s["key"] for s in op.stations if s["status"] == "done"} | ({box["key"]} if rc == 0 and box["key"] else set())
+    commit = next((l[7:] for l in box["lines"] if l.startswith("COMMIT=")), "")
+    if rc != 0:
+        uploaded = "upload" in done
+        op.can_revert = uploaded and not info["git"]
+        op.facts = [["File", ("uploaded, but not committed: put it right by hand in the git repo" if info["git"] else "uploaded; the backup is kept")
+                     if uploaded else "not uploaded; the server copy is unchanged"], ["Apps", "not restarted"]]
+        return fail(op, box["key"] or keys[0], error_of(box["lines"], "the upload failed"), box["lines"])
+    op.mark(box["key"], "done", commit or next((l for l in box["lines"] if l.startswith("backup:")), "") or "uploaded, checksum matches")
+    op.can_revert = True
+    op.result["commit"] = commit
+    op.facts = [["File", f"uploaded{' and committed (' + commit + ')' if commit else ''}"]]
+    if info["served"]:
+        if not restart_part(op, info["served"], "sv-"):
+            return
+        op.restarted.append(info["served"])
+    if info["verify"]:
+        op.mark("verify", "running")
+        rc, lines = helper(["config-verify", op.app, op.cfg], 120)
+        for l in lines:
+            if l.strip():
+                op.say("verify", l.strip())
+        if rc != 0:
+            op.facts.append(["Served", "the config server does not serve the new values"])
+            return fail(op, "verify", next((l for l in reversed(lines) if l.startswith(("SERVED=", "ERROR:"))), "the served values do not match"), lines)
+        n = sum(1 for l in lines if l.strip().startswith("OK"))
+        op.mark("verify", "done", f"{n} value(s) served as edited")
+        op.result["served"] = f"yes, {n} value(s) match"
+    if info["others"]:
+        with App.lock:
+            op.plan2 = {"apps": info["otherNames"]}
+            op.state = "awaiting"
+            op.mark("gate2", "running")
+        return
+    config_result(op, restarted=[app_name_of(op, x) for x in op.restarted])
+    op.facts = []
+    finish(op, "done")
+
+
+def app_name_of(op, app_id):
+    info = op.info
+    if app_id == info.get("served"):
+        return info.get("servedName") or app_id
+    if app_id in info.get("others", []):
+        return info["otherNames"][info["others"].index(app_id)]
+    return app_id
+
+
+def config_restart(body):
+    """The second choice of a config change: restart the apps that read the file now, or leave them."""
+    op = App.ops.get(body.get("op"))
+    if not op or op.kind != "config":
+        raise ApiError(404, "That operation is no longer here.")
+    with App.lock:
+        if op.state != "awaiting" or not op.plan2:
+            raise ApiError(409, "There is nothing to decide here any more.")
+        op.plan2 = None
+        if body.get("go") is not True:
+            op.mark("gate2", "done", "not now")
+            for s in op.stations:
+                if s["status"] == "pending":
+                    s["status"] = "skipped"
+            config_result(op, restarted=[app_name_of(op, x) for x in op.restarted], notRestarted=op.info["otherNames"])
+            op.facts = []
+            finish(op, "done")
+            return {"ok": True}
+        op.state = "running"
+    T.audit(f"{T.resolve(strict=False)[1]}/{op.app}", f"approved on the console page | restart after config change: {', '.join(op.info['others'])}")
+
+    def run(op):
+        op.mark("gate2", "done", "restart now")
+        for i, x in enumerate(op.info["others"]):
+            if not restart_part(op, x, f"r{i}-"):
+                return
+            op.restarted.append(x)
+        config_result(op, restarted=[app_name_of(op, x) for x in op.restarted])
+        op.facts = []
+        finish(op, "done")
+
+    guarded(op, run)
+    return {"ok": True}
+
+
+def start_config_revert(body):
+    src = App.ops.get(body.get("op"))
+    if not src or src.kind != "config" or not src.can_revert or src.reverted or src.state not in ("failed", "done"):
+        raise ApiError(409, "There is nothing to revert here.")
+    t, a, v = full_view(src.app)
+    info = src.info
+    again = [x for x in src.restarted if x != info["served"]]
+    route = [{"key": "gate", "zone": "gate", "label": "Your approval", "what": ""},
+             {"key": "revert", "zone": "change", "label": "Revert the change",
+              "what": f"git revert {src.result.get('commit', '').split(' ')[0]}".strip() if info["git"] else "restore the backup made before the upload"}]
+    if info["served"]:
+        route += restart_stations(t, info["served"], "sv-")
+    for i, x in enumerate(again):
+        route += restart_stations(t, x, f"r{i}-")
+    op = Op("config-revert", v["id"], v, route)
+    op.cfg, op.text, op.info, op.source = src.cfg, src.text, dict(info, others=again, otherNames=[app_name(t, x) for x in again]), src
+    claim(v["id"], "", op)
+    plan = {"app": op.app, "label": op.label, "target": op.target, "server": v["server"], "path": info["path"], "git": info["git"],
+            "undo": (src.plan or {}).get("summary") or src.text, "commit": src.result.get("commit", ""), "served": info["servedName"],
+            "others": op.info["otherNames"], "message": ""}
+    plan["digest"] = hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()[:16]
+    with App.lock:
+        op.plan, op.state = plan, "awaiting"
+        op.mark("gate", "running")
+    return {"op": op.id}
+
+
+def config_revert_run(op, view):
+    op.phase = "change"
+    op.mark("gate", "done", "approved")
+    op.mark("revert", "running")
+    out = []
+    rc = run_helper(op, ["config-revert", op.app, op.cfg], lambda l: (out.append(l), l.strip() and op.say("revert", l)), 600)
+    if rc != 0:
+        op.facts = [["File", "not reverted"]]
+        return fail(op, "revert", error_of(out, "the revert failed"), out)
+    op.mark("revert", "done", next((l for l in reversed(out) if l.startswith(("REVERTED", "RESTORED"))), "reverted")[:300])
+    if op.info["served"] and not restart_part(op, op.info["served"], "sv-"):
+        return
+    for i, x in enumerate(op.info["others"]):
+        if not restart_part(op, x, f"r{i}-"):
+            return
+    op.source.reverted = True
+    op.result.update(summary="Reverted: " + (op.plan.get("undo") or ""), path=op.plan.get("path"), total=fmt_span(now_ms() - op.started))
+    finish(op, "done")
+
+
+# ---------------------------------------------------------------- templates and this machine's settings
+
+SETTING_RE = re.compile(r"^(repo\.[a-z0-9][a-z0-9-]*|build\.[a-z0-9][a-z0-9-]*|git\.name|git\.email|config-dir)$")
+
+
+def setup(_=None):
+    local = T.load_local()
+    try:
+        cur = T.current_id(local)
+    except T.TemplateError:
+        cur = ""
+    out = {"templates": [dict(x, current=x["id"] == cur) for x in T.list_templates()], "current": cur,
+           "git": local.get("git") or {}, "repos": [], "builds": [], "servers": [], "configDir": "", "engine": bool(CLAUDE), "model": MODEL,
+           "mode": (os.environ.get("UAT_DEPLOY_MODE") or local.get("mode") or "terminal")}
+    if not cur:
+        return out
+    t, tid, _ = chosen()
+    Lc = T.local_template(local, tid)
+    out["configDir"] = Lc.get("config_dir") or ""
+    seen = set()
+    for a in t.get("apps") or []:
+        if not isinstance(a, dict):
+            continue
+        b = a.get("build") or {}
+        repo = b.get("repo")
+        if repo and repo not in seen:
+            seen.add(repo)
+            path = (Lc.get("repos") or {}).get(repo) or ""
+            full = os.path.expanduser(path)
+            state = "not set" if not path else "folder missing" if not os.path.isdir(full) else \
+                f"no {b['detect']} in it" if b.get("detect") and not os.path.exists(os.path.join(full, b["detect"])) else "ok"
+            out["repos"].append({"name": repo, "path": path, "detect": b.get("detect") or "", "state": state})
+        if b.get("command"):
+            out["builds"].append({"app": a["id"], "name": a.get("name") or a["id"], "command": b["command"],
+                                  "override": (Lc.get("builds") or {}).get(a["id"]) or ""})
+    for sid in T.used_servers(t):
+        s = (t.get("servers") or {}).get(sid) or {}
+        auth = T.auth_of(local, T.server_key(s))
+        how = ("password, saved" if auth["password_saved"] else "password, not saved yet") if auth["auth"] == "password" \
+            else f"SSH key {auth['key_file'] or '(default keys or agent)'}"
+        out["servers"].append({"id": sid, "label": s.get("label") or sid, "target": T.server_key(s), "signIn": how,
+                               "ready": auth["auth"] != "password" or auth["password_saved"]})
+    return out
+
+
+def save_setting(body):
+    key, value = body.get("key"), body.get("value")
+    if not isinstance(value, str) or len(value) > 1000 or "\n" in value:
+        raise ApiError(400, "That value cannot be saved.")
+    if key == "mode":
+        rc, lines = helper(["mode", value], 20)
+    elif isinstance(key, str) and SETTING_RE.match(key):
+        rc, lines = helper(["set", key, value.strip()], 20)
+    else:
+        raise ApiError(400, "Not a setting.")
+    if rc != 0:
+        raise ApiError(400, error_of(lines, "The setting could not be saved."))
+    return setup()
+
+
+_configurator = None
+
+
+def configurator():
+    """The template configurator's handlers (scripts/uat-ui), served by this server under /configure."""
+    global _configurator
+    if _configurator is None:
+        loader = importlib.machinery.SourceFileLoader("uat_configurator", str(HERE / "uat-ui"))
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("uat_configurator", loader))
+        loader.exec_module(mod)
+        _configurator = mod
+    return _configurator
+
+
+def op_view(query):
+    op = App.ops.get((query.get("id") or [""])[0])
+    if not op:
+        raise ApiError(404, "That operation is no longer here.")
+    try:
+        since = int((query.get("since") or ["0"])[0])
+    except ValueError:
+        since = 0
+    deadline = time.time() + 20
+    with App.lock:
+        stamp = lambda: (op.n, op.state, op.question, bool(op.plan), bool(op.plan2), json.dumps([(s["status"], s["note"]) for s in op.stations]))
+        seen = (query.get("v") or [""])[0]
+        while time.time() < deadline:
+            v = hashlib.sha1(repr(stamp()).encode()).hexdigest()[:12]
+            if v != seen:
+                break
+            App.lock.wait(timeout=1)
+        out = op.view(since)
+        out["v"] = hashlib.sha1(repr(stamp()).encode()).hexdigest()[:12]
+        return out
+
+
+def wait_view(query):
+    """Long poll for uat console --wait."""
+    try:
+        after = int((query.get("after") or ["0"])[0])
+    except ValueError:
+        after = 0
+    deadline = time.time() + 25
+    with App.lock:
+        while True:
+            App.last_wait = time.time()
+            items = [x for x in App.outbox if x["seq"] > after]
+            if items or App.closed or time.time() >= deadline:
+                return {"items": items, "closed": App.closed, "pid": os.getpid()}
+            App.lock.wait(timeout=1)
+
+
+def load_prefs():
+    try:
+        p = json.loads(PREFS.read_text())
+        return {"theme": p.get("theme")} if p.get("theme") in ("light", "dark") else {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def save_pref(body):
+    theme = body.get("theme")
+    T.write_atomic(PREFS, json.dumps({"theme": theme} if theme in ("light", "dark") else {}), 0o600)
+    return {"ok": True}
+
+
+def done(_):
+    with App.lock:
+        if App.busy_apps and any(App.ops[o].state == "running" for o in App.busy_apps.values()):
+            raise ApiError(409, "An operation is still running. Close the page when it has finished.")
+        App.closed = "done"
+        App.lock.notify_all()
+    threading.Thread(target=lambda: (time.sleep(1.5), App.server.shutdown()), daemon=True).start()
+    return {"ok": True}
+
+
+GET = {"/api/state": state, "/api/overview": overview, "/api/log": app_log, "/api/activity": activity, "/api/op": op_view,
+       "/api/wait": wait_view, "/api/ask": ask_view, "/api/setup": setup, "/api/vitals": vitals,
+       "/api/prefs": lambda _q: load_prefs()}
+POST = {"/api/deploy": start_deploy, "/api/approve": approve_any, "/api/cancel": cancel, "/api/dismiss": dismiss,
+        "/api/restart": lambda b: start_simple(b, "restart"), "/api/rollback": lambda b: start_simple(b, "rollback"),
+        "/api/use": use_template, "/api/prefs": save_pref, "/api/done": done,
+        "/api/ask": ask_start, "/api/ask/stop": ask_stop, "/api/ask/delete": ask_delete, "/api/ask/save": ask_save,
+        "/api/setting": save_setting,
+        "/api/config": start_config, "/api/config/reply": config_reply, "/api/config/restart": config_restart,
+        "/api/config/revert": start_config_revert}
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    server_version = "uat-deploy"
+    sys_version = ""
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        self.route("GET")
+
+    def do_POST(self):
+        self.route("POST")
+
+    def route(self, method):
+        url = urllib.parse.urlsplit(self.path)
+        query = urllib.parse.parse_qs(url.query)
+        # Only this machine, only through the 127.0.0.1/localhost name (blocks DNS rebinding), only with the token.
+        if self.headers.get("Host", "") not in App.hosts:
+            return self.send_text(403, "Forbidden")
+        token = (query.get("token") or [""])[0]
+        if not hmac.compare_digest(token.encode(), App.token.encode()):
+            return self.send_text(403, "Forbidden: open the link that uat console printed.")
+        if url.path not in ("/api/wait", "/api/ping-server"):
+            App.last_page = time.time()
+        try:
+            if method == "GET" and url.path == "/":
+                page = PAGE.read_text().replace('<meta charset="utf-8">', '<meta charset="utf-8">\n<script>window.__prefs = '
+                                                + json.dumps(load_prefs()) + ";</script>", 1)
+                return self.send_bytes(200, page.encode(), "text/html; charset=utf-8")
+            if url.path == "/configure" or url.path.startswith("/configure/"):
+                return self.configure(method, url.path[len("/configure"):], query)
+            if method == "GET" and url.path == "/api/ping-server":
+                return self.send_json({"ok": True, "pid": os.getpid()})
+            if method == "GET" and url.path in GET:
+                return self.send_json(GET[url.path](query))
+            if method == "POST" and url.path in POST:
+                if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
+                    raise ApiError(415, "Send JSON.")
+                length = int(self.headers.get("Content-Length") or 0)
+                if length > 64 * 1024:
+                    raise ApiError(413, "Request too large.")
+                body = json.loads(self.rfile.read(length) or b"{}")
+                return self.send_json(POST[url.path](body if isinstance(body, dict) else {}))
+            return self.send_text(404, "Not found")
+        except ApiError as e:
+            return self.send_json({"error": e.message}, e.status)
+        except T.TemplateError as e:
+            return self.send_json({"error": str(e)}, 400)
+        except (ValueError, KeyError, TypeError):
+            return self.send_json({"error": "The request was not valid."}, 400)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as e:
+            return self.send_json({"error": f"The console hit an error: {e}"}, 500)
+
+    def configure(self, method, path, query):
+        C = configurator()
+        try:
+            if method == "GET" and path in ("", "/"):
+                page = CONFIGURATOR.read_text().replace('<meta charset="utf-8">', '<meta charset="utf-8">\n<script>window.__console = true; window.__prefs = '
+                                                        + json.dumps(load_prefs()) + ";</script>", 1)
+                return self.send_bytes(200, page.encode(), "text/html; charset=utf-8")
+            if method == "GET" and path in C.GET:
+                return self.send_json(C.GET[path](query))
+            if method == "POST" and path == "/api/done":
+                return self.send_json({"ok": True})
+            if method == "POST" and path in C.POST:
+                length = int(self.headers.get("Content-Length") or 0)
+                if length > 512 * 1024:
+                    return self.send_json({"error": "Request too large."}, 413)
+                body = json.loads(self.rfile.read(length) or b"{}")
+                return self.send_json(C.POST[path](body if isinstance(body, dict) else {}))
+            return self.send_text(404, "Not found")
+        except C.ApiError as e:
+            return self.send_json({"error": e.message, **e.extra}, e.status)
+
+    def send_json(self, payload, status=200):
+        self.send_bytes(status, json.dumps(payload).encode(), "application/json")
+
+    def send_text(self, status, text):
+        self.send_bytes(status, text.encode(), "text/plain; charset=utf-8")
+
+    def send_bytes(self, status, body, content_type):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy",
+                         "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' "
+                         "https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; "
+                         "connect-src 'self'; frame-ancestors 'none'")
+        self.end_headers()
+        self.wfile.write(body)
+
+
+# ---------------------------------------------------------------- process
+
+
+def running_session():
+    try:
+        info = json.loads(SESSION.read_text())
+        os.kill(info["pid"], 0)
+        with urllib.request.urlopen(f"http://127.0.0.1:{info['port']}/api/ping-server?token={info['token']}", timeout=2) as r:
+            if json.load(r).get("pid") == info["pid"]:
+                return info
+    except Exception:
+        pass
+    return None
+
+
+def open_browser(url):
+    if sys.platform == "darwin":
+        cmd = ["open", url]
+    elif os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+        cmd = ["xdg-open", url]
+    else:
+        cmd = ["wslview", url]
+    try:
+        subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        return True
+    except OSError:
+        return False
+
+
+def serve():
+    App.token = secrets.token_urlsafe(24)
+    App.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    App.server.daemon_threads = True
+    port = App.server.server_address[1]
+    App.hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+    RUN.mkdir(parents=True, exist_ok=True)
+    os.chmod(RUN, 0o700)
+    T.write_atomic(SESSION, json.dumps({"pid": os.getpid(), "port": port, "token": App.token}), 0o600)
+
+    def watchdog():
+        while True:
+            time.sleep(15)
+            with App.lock:
+                busy = any(o.state == "running" for o in App.ops.values()) or any(i["state"] == "running" for t in Ask.threads for i in t["items"])
+                if not busy and time.time() - App.last_page > IDLE_SECONDS:
+                    App.closed = "idle"
+                    App.lock.notify_all()
+                    break
+        time.sleep(1.5)
+        App.server.shutdown()
+
+    threading.Thread(target=watchdog, daemon=True).start()
+    signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=App.server.shutdown, daemon=True).start())
+    try:
+        App.server.serve_forever(poll_interval=0.5)
+    finally:
+        try:
+            if json.loads(SESSION.read_text()).get("pid") == os.getpid():
+                SESSION.unlink()
+        except (OSError, ValueError):
+            pass
+
+
+def start_detached():
+    child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--serve"], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        info = running_session()
+        if info and info["pid"] == child.pid:
+            return info
+        if child.poll() is not None:
+            return None
+        time.sleep(0.1)
+    return None
+
+
+def wait():
+    info = running_session()
+    if not info:
+        print("CLOSED=not-running (no console page is open; open one with uat console)")
+        return 0
+    try:
+        seen = json.loads(REPORTED.read_text())
+        after = seen["seq"] if seen.get("pid") == info["pid"] else 0
+    except (OSError, ValueError, KeyError):
+        after = 0
+    while True:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{info['port']}/api/wait?token={info['token']}&after={after}", timeout=40) as r:
+                res = json.load(r)
+        except (urllib.error.URLError, OSError, ValueError):
+            print("CLOSED=stopped")
+            return 0
+        items = res.get("items") or []
+        if items:
+            T.write_atomic(REPORTED, json.dumps({"pid": info["pid"], "seq": items[-1]["seq"]}), 0o600)
+            for it in items:
+                print(it["text"])
+                print()
+        if res.get("closed"):
+            print(f"CLOSED={res['closed']}")
+            return 0
+        if items:
+            print("CONSOLE=open (run uat console --wait again to keep following the page)")
+            return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(add_help=True)
+    ap.add_argument("app", nargs="?", default="")
+    ap.add_argument("--view", default="", choices=["", "apps", "config", "ask", "activity", "templates"])
+    ap.add_argument("--no-open", action="store_true")
+    ap.add_argument("--wait", action="store_true")
+    ap.add_argument("--serve", action="store_true", help=argparse.SUPPRESS)
+    a = ap.parse_args()
+    if a.serve:
+        serve()
+        return 0
+    if a.wait:
+        return wait()
+    try:
+        t, tid, _ = T.resolve(strict=False)
+        if a.app:
+            T.find_app(t, a.app)
+    except T.TemplateError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    info = running_session() or start_detached()
+    if not info:
+        print("ERROR: the console did not start", file=sys.stderr)
+        return 1
+    view = (f"app/{a.app}" + ("/config" if a.view == "config" else "")) if a.app else a.view if a.view in ("ask", "activity", "templates") else "apps"
+    url = f"http://127.0.0.1:{info['port']}/?token={info['token']}#/{view}"
+    opened = False if a.no_open else open_browser(url)
+    print(f"OPEN={url}")
+    print("The console is open in the browser." if opened else "Open the link above in a browser.")
+    print(f"Template: {tid}. Deploys, config changes, questions and templates are all on the page; every change waits for its Approve button.")
+    print("uat console --wait reports each finished operation.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,540 @@
+#!/usr/bin/env python3
+"""uat-deploy template configurator: a local page for creating and editing project templates.
+
+Usage: uat-ui [ID | --new] [--no-open]    start (or reuse) the page server, open the page, print OPEN=<link>
+       uat-ui --wait                        block until the page's Done button or 30 idle minutes, then print
+                                            SAVED=<id> <file> for each save and CLOSED=done|idle
+The server listens on 127.0.0.1 only and answers only requests that carry its one-time token.
+"""
+import argparse
+import hmac
+import http.server
+import json
+import os
+import re
+import secrets
+import signal
+import subprocess
+import sys
+import threading
+import time
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import uattpl as T  # noqa: E402
+
+PAGE = T.SKILL / "ui" / "index.html"
+UAT = HERE / "uat"
+RUN = T.CACHE_DIR / "ui"
+SESSION = RUN / "session.json"
+RESULT = RUN / "result.json"
+IDLE_SECONDS = 30 * 60
+
+
+class ApiError(Exception):
+    def __init__(self, status, message, extra=None):
+        super().__init__(message)
+        self.status, self.message, self.extra = status, message, extra or {}
+
+
+class App:
+    token = ""
+    hosts = set()
+    last = time.time()
+    saves = []
+    server = None
+    closed = ""
+
+
+# ---------------------------------------------------------------- data
+
+
+def _tid(v):
+    if not isinstance(v, str) or not T.ID_RE.match(v):
+        raise ApiError(400, "That is not a template id.")
+    return v
+
+
+def local_view(tid):
+    local = T.load_local()
+    L = (local.get("templates") or {}).get(tid) or {}
+    return {"repos": L.get("repos") or {}, "builds": L.get("builds") or {}, "config_dir": L.get("config_dir") or ""}
+
+
+def auth_view(t):
+    local = T.load_local()
+    out = {}
+    for s in (t.get("servers") or {}).values() if isinstance(t, dict) and isinstance(t.get("servers"), dict) else []:
+        if isinstance(s, dict) and s.get("host") and s.get("user"):
+            out[T.server_key(s)] = T.auth_of(local, T.server_key(s))
+    return out
+
+
+def bootstrap(_):
+    local = T.load_local()
+    try:
+        cur = T.current_id(local)
+    except T.TemplateError:
+        cur = ""
+    in_git = subprocess.run(["git", "-C", str(T.SKILL), "rev-parse", "--git-dir"], capture_output=True).returncode == 0
+    return {"templates": T.list_templates(), "current": cur, "git": local.get("git") or {}, "ssh_keys": T.ssh_keys(),
+            "templates_dir": str(T.TEMPLATES), "in_git": in_git, "placeholders": list(T.PLACEHOLDERS),
+            "spring_ready": T.SPRING_READY, "styles": list(T.STYLES), "formats": list(T.FORMATS),
+            "default_timeouts": {"start": T.DEFAULT_START_TIMEOUT, "stop": T.DEFAULT_STOP_TIMEOUT},
+            "home": str(Path.home())}
+
+
+def get_template(query):
+    tid = _tid((query.get("id") or [""])[0])
+    f = T.template_path(tid)
+    if not f.exists():
+        raise ApiError(404, f"There is no template '{tid}'.")
+    text = f.read_text()
+    t = T.normalize(T.load_file(f))
+    return {"template": t, "file_text": text, "file": str(f), "local": local_view(tid), "auth": auth_view(t)}
+
+
+def _draft(body):
+    t = body.get("template")
+    if not isinstance(t, dict):
+        raise ApiError(400, "Send the template.")
+    return T.normalize(t)
+
+
+def preview(body):
+    t = _draft(body)
+    original = body.get("original_id") or None
+    errors, warnings = T.validate(t, original)
+    if not original and isinstance(t.get("id"), str) and T.ID_RE.match(t["id"]) and T.template_path(t["id"]).exists():
+        errors.insert(0, {"path": ["id"], "label": "id", "message": f"a template '{t['id']}' already exists; pick another id"})
+    return {"yaml": T.render(t), "errors": errors, "warnings": warnings, "auth": auth_view(t)}
+
+
+def save(body):
+    t = _draft(body)
+    original = body.get("original_id") or None
+    tid = t.get("id")
+    res = preview(body)
+    if res["errors"]:
+        raise ApiError(400, f"Fix {len(res['errors'])} problem(s) before saving.", {"errors": res["errors"]})
+    if original and tid != original:
+        raise ApiError(400, "A template's id cannot change after it is saved.")
+    f = T.template_path(tid)
+    existed = f.exists()
+    T.TEMPLATES.mkdir(parents=True, exist_ok=True)
+    T.write_atomic(f, res["yaml"])
+    T.audit("-", f"settings | template {tid} {'updated' if existed else 'created'} from the configurator")
+    App.saves.append({"id": tid, "file": str(f), "at": int(time.time()), "created": not existed})
+    _write_result()
+    status = ""
+    r = subprocess.run(["git", "-C", str(T.SKILL), "status", "--short", "--", str(f)], capture_output=True, text=True)
+    if r.returncode == 0:
+        status = r.stdout.strip() or "unchanged in git"
+    return {"id": tid, "file": str(f), "yaml": res["yaml"], "git": status, "templates": T.list_templates()}
+
+
+def save_local(body):
+    tid = _tid(body.get("template_id"))
+    kind, name, value = body.get("kind"), str(body.get("name") or ""), str(body.get("value") or "").strip()
+    local = T.load_local()
+    L = T.local_template(local, tid)
+    expanded = os.path.expanduser(value)
+    if kind == "repo":
+        if not T.ID_RE.match(name):
+            raise ApiError(400, "Name the repo in the build section first.")
+        if value and not os.path.isdir(expanded):
+            raise ApiError(400, f"{value} is not a folder on this machine.")
+        L.setdefault("repos", {})[name] = value
+        if not value:
+            del L["repos"][name]
+    elif kind == "build":
+        if not T.ID_RE.match(name):
+            raise ApiError(400, "Give the app an id first.")
+        L.setdefault("builds", {})[name] = value
+        if not value:
+            del L["builds"][name]
+    elif kind == "config_dir":
+        if value and not os.path.isdir(expanded):
+            raise ApiError(400, f"{value} is not a folder on this machine.")
+        L["config_dir"] = value
+    elif kind == "git":
+        if name not in ("name", "email"):
+            raise ApiError(400, "Unknown git setting.")
+        local.setdefault("git", {})[name] = value
+    else:
+        raise ApiError(400, "Unknown setting.")
+    T.save_local(local)
+    hint = ""
+    if kind == "repo" and value and body.get("detect"):
+        if not os.path.exists(os.path.join(expanded, str(body["detect"]))):
+            hint = f"No {body['detect']} in this folder; check it is the right repo."
+    return {"ok": True, "hint": hint, "local": local_view(tid)}
+
+
+def save_auth(body):
+    host, user, how = str(body.get("host") or ""), str(body.get("user") or ""), body.get("auth")
+    if not T.HOST_RE.match(host) or "@" in host or not T.USER_RE.match(user):
+        raise ApiError(400, "Fill in the server's host and user first.")
+    key = f"{user}@{host}"
+    if how == "key":
+        kf = str(body.get("key_file") or "").strip()
+        if kf:
+            if kf.endswith(".pub"):
+                raise ApiError(400, "Pick the private key, not the .pub file.")
+            if not os.path.isfile(os.path.expanduser(kf)):
+                raise ApiError(400, f"{kf} is not a file on this machine.")
+        T.set_auth(key, "key", kf)
+        T.audit("-", f"settings | sign-in for {key}: ssh key {kf or '(default keys / agent)'}")
+    elif how == "password":
+        pw = body.get("password")
+        if pw:
+            if not isinstance(pw, str) or "\n" in pw or len(pw) > 512:
+                raise ApiError(400, "That password cannot be saved.")
+            T.save_password(key, pw)
+            T.audit("-", f"settings | password saved for {key}")
+        elif not T.auth_of(T.load_local(), key)["password_saved"]:
+            raise ApiError(400, "Type the password to save it.")
+        T.set_auth(key, "password")
+    else:
+        raise ApiError(400, "Choose an SSH key or a password.")
+    return {"key": key, "auth": T.auth_of(T.load_local(), key)}
+
+
+def run_uat(t, args, timeout=150):
+    RUN.mkdir(parents=True, exist_ok=True)
+    draft = RUN / f"draft-{os.getpid()}-{threading.get_ident()}.yml"
+    T.write_atomic(draft, T.render(t), 0o600)
+    env = dict(os.environ, UAT_TEMPLATE_FILE=str(draft))
+    try:
+        p = subprocess.run([str(UAT), *args], capture_output=True, text=True, timeout=timeout, env=env, stdin=subprocess.DEVNULL)
+        return p.returncode, (p.stdout + p.stderr).strip()
+    except subprocess.TimeoutExpired:
+        raise ApiError(504, "The server took too long to answer.")
+    finally:
+        try:
+            draft.unlink()
+        except OSError:
+            pass
+
+
+def check(body):
+    t = _draft(body)
+    rc, out = run_uat(t, ["check-paths"])
+    groups, cur = [], None
+    for line in out.splitlines():
+        m = re.match(r"^\[([a-z0-9-]+)\] (\S+)", line)
+        if m:
+            cur = {"server": m.group(1), "target": m.group(2), "items": []}
+            groups.append(cur)
+            continue
+        m = re.match(r"^(PASS|FAIL|WARN|INFO)\s+(?:\[([a-z0-9-]+)\] )?(.*)$", line)
+        if m and cur is not None:
+            cur["items"].append({"status": m.group(1), "app": m.group(2) or "", "text": m.group(3)})
+        elif line.startswith("ERROR:"):
+            return {"ok": False, "error": line[6:].strip(), "groups": groups}
+    return {"ok": rc == 0, "groups": groups, "error": "" if groups else out[-600:]}
+
+
+def detect(body):
+    t = _draft(body)
+    server, d = str(body.get("server") or ""), str(body.get("dir") or "")
+    if not T.ID_RE.match(server):
+        raise ApiError(400, "Pick the app's server first.")
+    if not T.PATH_RE.match(d):
+        raise ApiError(400, "Enter the app's folder as an absolute path first.")
+    rc, out = run_uat(t, ["detect", server, d], timeout=90)
+    if rc != 0:
+        msg = next((l[6:].strip() for l in out.splitlines() if l.startswith("ERROR:")), out[-400:])
+        raise ApiError(502, msg or "Detect failed.")
+    res = {"dir": d, "missing": False, "scripts": {}, "artifacts": [], "procs": {}}
+    for line in out.splitlines():
+        k, _, v = line.partition("=")
+        if k == "MISSING_DIR":
+            res["missing"] = True
+        elif k == "DIR":
+            res["dir"] = v
+        elif k == "SCRIPT":
+            name, _, ex = v.partition(" ")
+            res["scripts"][name] = {"name": name, "exec": ex == "exec", "jars": [], "logs": [], "ports": [],
+                                    "multiline": False, "stops": False, "starts": False}
+        elif k in ("JAR_LINE", "LOG", "PORT_HINT", "MULTILINE", "STOPS", "STARTS"):
+            parts = v.split(" ")
+            sc = res["scripts"].get(parts[0])
+            if not sc:
+                continue
+            if k == "JAR_LINE" and len(parts) >= 3:
+                sc["jars"].append({"line": int(parts[1]), "jar": parts[2]})
+            elif k == "LOG" and len(parts) >= 3:
+                path = parts[2] if parts[2].startswith("/") else f"{res['dir'].rstrip('/')}/{parts[2]}"
+                if path not in [x["path"] for x in sc["logs"]]:
+                    sc["logs"].append({"path": path, "append": parts[1] == ">>"})
+            elif k == "PORT_HINT" and len(parts) >= 2:
+                sc["ports"].append(int(parts[1]))
+            elif k == "MULTILINE":
+                sc["multiline"] = True
+            elif k == "STOPS":
+                sc["stops"] = True
+            elif k == "STARTS":
+                sc["starts"] = True
+        elif k == "ARTIFACT":
+            res["artifacts"].append(v)
+        elif k == "PROC":
+            pid, uptime, args = (v.split(" ", 2) + ["", ""])[:3]
+            res["procs"][pid] = {"pid": pid, "uptime": uptime, "args": args, "ports": [], "jar": ""}
+        elif k == "PROCJAR":
+            pid, _, jar = v.partition(" ")
+            if pid in res["procs"]:
+                res["procs"][pid]["jar"] = jar.rsplit("/", 1)[-1]
+        elif k == "PORT":
+            pid, _, port = v.partition(" ")
+            if pid in res["procs"] and port.isdigit():
+                res["procs"][pid]["ports"].append(int(port))
+    res["scripts"] = list(res["scripts"].values())
+    res["procs"] = list(res["procs"].values())
+    return res
+
+
+def ping(body):
+    t = _draft(body)
+    server = str(body.get("server") or "")
+    if not T.ID_RE.match(server):
+        raise ApiError(400, "Give the server an id first.")
+    rc, out = run_uat(t, ["ping", server], timeout=60)
+    lines = [l for l in out.splitlines() if l.strip()]
+    msg = next((l[6:].strip() for l in lines if l.startswith("ERROR:")), "")
+    return {"ok": rc == 0, "text": msg or (lines[-1] if lines else "")}
+
+
+def done(_):
+    App.closed = "done"
+    _write_result()
+    threading.Thread(target=lambda: (time.sleep(0.3), App.server.shutdown()), daemon=True).start()
+    return {"ok": True}
+
+
+def _write_result():
+    T.write_atomic(RESULT, json.dumps({"pid": os.getpid(), "saves": App.saves, "closed": App.closed}), 0o600)
+
+
+GET = {"/api/bootstrap": bootstrap, "/api/template": get_template}
+POST = {"/api/preview": preview, "/api/save": save, "/api/local": save_local, "/api/auth": save_auth,
+        "/api/check": check, "/api/detect": detect, "/api/ping": ping, "/api/done": done}
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    server_version = "uat-deploy"
+    sys_version = ""
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        self.route("GET")
+
+    def do_POST(self):
+        self.route("POST")
+
+    def route(self, method):
+        App.last = time.time()
+        url = urllib.parse.urlsplit(self.path)
+        query = urllib.parse.parse_qs(url.query)
+        # Only this machine, only through the 127.0.0.1/localhost name (blocks DNS rebinding), only with the token.
+        if self.headers.get("Host", "") not in App.hosts:
+            return self.send_text(403, "Forbidden")
+        token = (query.get("token") or [""])[0]
+        if not hmac.compare_digest(token.encode(), App.token.encode()):
+            return self.send_text(403, "Forbidden: open the link that uat configure printed.")
+        try:
+            if method == "GET" and url.path == "/":
+                return self.send_bytes(200, PAGE.read_bytes(), "text/html; charset=utf-8")
+            if method == "GET" and url.path == "/api/ping-server":
+                return self.send_json({"ok": True, "pid": os.getpid()})
+            if method == "GET" and url.path in GET:
+                return self.send_json(GET[url.path](query))
+            if method == "POST" and url.path in POST:
+                if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
+                    raise ApiError(415, "Send JSON.")
+                length = int(self.headers.get("Content-Length") or 0)
+                if length > 512 * 1024:
+                    raise ApiError(413, "Request too large.")
+                body = json.loads(self.rfile.read(length) or b"{}")
+                return self.send_json(POST[url.path](body if isinstance(body, dict) else {}))
+            return self.send_text(404, "Not found")
+        except ApiError as e:
+            return self.send_json({"error": e.message, **e.extra}, e.status)
+        except T.TemplateError as e:
+            return self.send_json({"error": str(e)}, 400)
+        except (ValueError, KeyError, TypeError):
+            return self.send_json({"error": "The request was not valid."}, 400)
+
+    def send_json(self, payload, status=200):
+        self.send_bytes(status, json.dumps(payload).encode(), "application/json")
+
+    def send_text(self, status, text):
+        self.send_bytes(status, text.encode(), "text/plain; charset=utf-8")
+
+    def send_bytes(self, status, body, content_type):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy",
+                         "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' "
+                         "https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; "
+                         "connect-src 'self'; frame-ancestors 'none'")
+        self.end_headers()
+        self.wfile.write(body)
+
+
+# ---------------------------------------------------------------- process
+
+
+def running_session():
+    try:
+        info = json.loads(SESSION.read_text())
+        os.kill(info["pid"], 0)
+        with urllib.request.urlopen(f"http://127.0.0.1:{info['port']}/api/ping-server?token={info['token']}", timeout=2) as r:
+            if json.load(r).get("pid") == info["pid"]:
+                return info
+    except Exception:
+        pass
+    return None
+
+
+def page_url(info, view):
+    return f"http://127.0.0.1:{info['port']}/?token={info['token']}#{view}"
+
+
+def open_browser(url):
+    if sys.platform == "darwin":
+        cmd = ["open", url]
+    elif os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+        cmd = ["xdg-open", url]
+    else:
+        cmd = ["wslview", url]
+    try:
+        subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        return True
+    except OSError:
+        return False
+
+
+def serve():
+    App.token = secrets.token_urlsafe(24)
+    App.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    port = App.server.server_address[1]
+    App.hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+    RUN.mkdir(parents=True, exist_ok=True)
+    os.chmod(RUN, 0o700)
+    _write_result()
+    T.write_atomic(SESSION, json.dumps({"pid": os.getpid(), "port": port, "token": App.token}), 0o600)
+
+    def watchdog():
+        while True:
+            time.sleep(15)
+            if time.time() - App.last > IDLE_SECONDS:
+                App.closed = "idle"
+                _write_result()
+                App.server.shutdown()
+                return
+
+    threading.Thread(target=watchdog, daemon=True).start()
+    signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=App.server.shutdown, daemon=True).start())
+    try:
+        App.server.serve_forever(poll_interval=0.5)
+    finally:
+        App.closed = App.closed or "stopped"
+        _write_result()
+        try:
+            if json.loads(SESSION.read_text()).get("pid") == os.getpid():
+                SESSION.unlink()
+        except (OSError, ValueError):
+            pass
+
+
+def start_detached():
+    child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--serve"], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        info = running_session()
+        if info and info["pid"] == child.pid:
+            return info
+        if child.poll() is not None:
+            return None
+        time.sleep(0.1)
+    return None
+
+
+def _result():
+    try:
+        return json.loads(RESULT.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def wait():
+    info = running_session()
+    if info:
+        while True:
+            try:
+                os.kill(info["pid"], 0)
+            except OSError:
+                break
+            time.sleep(1)
+        res = _result()
+        if res.get("pid") != info["pid"]:
+            res = {}
+    else:
+        # the page may have closed before --wait started; report that session once
+        res = _result()
+        if not res.get("closed") or res.get("reported"):
+            print("CLOSED=not-running (no configurator page is open)")
+            return 0
+    if res:
+        T.write_atomic(RESULT, json.dumps({**res, "reported": True}), 0o600)
+    for s in res.get("saves") or []:
+        print(f"SAVED={s['id']} {s['file']} ({'created' if s.get('created') else 'updated'})")
+    if not res.get("saves"):
+        print("SAVED=none")
+    print(f"CLOSED={res.get('closed') or 'stopped'}")
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(add_help=True)
+    ap.add_argument("target", nargs="?", default="")
+    ap.add_argument("--new", action="store_true")
+    ap.add_argument("--no-open", action="store_true")
+    ap.add_argument("--wait", action="store_true")
+    ap.add_argument("--serve", action="store_true", help=argparse.SUPPRESS)
+    a = ap.parse_args()
+    if a.serve:
+        serve()
+        return 0
+    if a.wait:
+        return wait()
+    if a.target and not T.template_path(a.target).exists():
+        print(f"ERROR: no template '{a.target}'; use --new to create one", file=sys.stderr)
+        return 1
+    view = "new" if a.new else f"edit/{a.target}" if a.target else "home"
+    info = running_session() or start_detached()
+    if not info:
+        print("ERROR: the configurator did not start", file=sys.stderr)
+        return 1
+    url = page_url(info, view)
+    opened = False if a.no_open else open_browser(url)
+    print(f"OPEN={url}")
+    print("The page is open in the browser." if opened else "Open the link above in a browser.")
+    print("When you are done there, press Done on the page; uat configure --wait reports what was saved.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

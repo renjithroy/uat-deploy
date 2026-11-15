@@ -1,0 +1,941 @@
+#!/usr/bin/env bash
+# The uat-deploy skill's only route to UAT servers. Apps, servers and paths come from the chosen template
+# (templates/<id>.yml). Every change it makes on a server is written to the audit log.
+# Usage: uat [--dry-run] <command> [args]   (uat help lists the commands)
+set -uo pipefail
+
+SELF=$(readlink -f "$0")
+SKILL_DIR=$(dirname "$(dirname "$SELF")")
+LIB=$SKILL_DIR/scripts/uatlib.py
+TPL=$SKILL_DIR/scripts/uattpl.py
+CONF_DIR=${UAT_DEPLOY_CONFIG_DIR:-$HOME/.config/uat-deploy}
+CACHE_DIR=${UAT_DEPLOY_CACHE_DIR:-$HOME/.cache/uat-deploy}
+STATE_DIR=${UAT_DEPLOY_STATE_DIR:-$HOME/.local/state/uat-deploy}
+AUDIT=$STATE_DIR/audit.log
+export UAT_DEPLOY_CONFIG_DIR=$CONF_DIR UAT_DEPLOY_CACHE_DIR=$CACHE_DIR UAT_DEPLOY_STATE_DIR=$STATE_DIR
+export UAT_PASSWORD_FILE=
+
+DRY=0
+if [ "${1:-}" = "--dry-run" ]; then DRY=1; shift; fi
+APP=-
+T_ID=-
+KIND=deploy
+TARGET=
+
+die()   { echo "ERROR: $*" >&2; exit 1; }
+q()     { printf '%q' "$1"; }
+mask()  { python3 "$LIB" mask; }
+sha()   { sha256sum "$1" | cut -c1-64; }
+step()  { echo; echo "$*"; }
+audit() { mkdir -p "$STATE_DIR"; printf '%s | %s | %s | %s\n' "$(date '+%F %T')" "$(id -un)" "$T_ID/$APP" "$*" >> "$AUDIT"; }
+
+# ---------------------------------------------------------------- template, app and server
+
+# load_app APP [CFG|-]: the app's settings (A_*), its server (S_*) and, with CFG, one config file (C_*)
+load_app() {
+  [ -n "${1:-}" ] || die "name an app (uat apps lists them)"
+  local out
+  out=$(python3 "$TPL" env "$@") || exit 1
+  eval "$out"
+  APP=$A_ID
+  use_server
+  WORK=$CACHE_DIR/templates/$T_ID/$APP
+  mkdir -p "$WORK"
+}
+
+load_server() {
+  local out
+  out=$(python3 "$TPL" server-env ${1:+"$1"}) || exit 1
+  eval "$out"
+  use_server
+}
+
+SSH_BASE=(-o ServerAliveInterval=30 -o ServerAliveCountMax=4 -o StrictHostKeyChecking=accept-new
+          -o NumberOfPasswordPrompts=1 -o GSSAPIAuthentication=no -o ConnectTimeout=15 -o LogLevel=ERROR)
+# the control socket needs a short path (unix sockets cap at ~100 chars), so it lives in the runtime dir
+SOCK_DIR=${XDG_RUNTIME_DIR:-$HOME/.cache}
+
+use_server() {
+  TARGET=$S_USER@$S_HOST
+  export UAT_PASSWORD_FILE=$S_PWFILE
+  SSH_OPTS=(-o "ControlPath=$SOCK_DIR/uat-deploy-%C" "${SSH_BASE[@]}")
+  if [ "$S_AUTH" = key ]; then
+    SSH_OPTS+=(-o BatchMode=yes)
+    [ -n "$S_KEY" ] && SSH_OPTS+=(-i "$S_KEY" -o IdentitiesOnly=yes)
+  fi
+}
+
+connect() {
+  [ -n "$TARGET" ] || die "no server chosen"
+  mkdir -p "$CACHE_DIR" && chmod 700 "$CACHE_DIR"
+  if [ "$S_AUTH" = password ]; then
+    [ -s "$UAT_PASSWORD_FILE" ] || die "no password saved for $TARGET; save one with uat set-password $S_ID, or sign in with an SSH key (uat set auth.$S_ID key)"
+    export SSH_ASKPASS=$SKILL_DIR/scripts/askpass SSH_ASKPASS_REQUIRE=force
+  else
+    [ -z "$S_KEY" ] || [ -r "$S_KEY" ] || die "SSH key $S_KEY for $TARGET is missing or unreadable"
+    unset SSH_ASKPASS SSH_ASKPASS_REQUIRE
+  fi
+  ssh "${SSH_OPTS[@]}" -O check "$TARGET" >/dev/null 2>&1 && return 0
+  # one shared login per server; later calls reuse it, so a password is sent once per 15 idle minutes
+  if ! timeout 40 ssh "${SSH_OPTS[@]}" -o ControlMaster=yes -o ControlPersist=15m -Nf "$TARGET" \
+       </dev/null >/dev/null 2>"$CACHE_DIR/connect.err"; then
+    local why
+    why=$(mask < "$CACHE_DIR/connect.err" | tail -n 1)
+    if [ "$S_AUTH" = password ]; then
+      die "cannot log in to $TARGET: $why. The password is tried once only, so the account is not locked."
+    fi
+    die "cannot log in to $TARGET with an SSH key: $why. A key with a passphrase must be loaded with ssh-add first; the key's .pub must be in the server's ~/.ssh/authorized_keys."
+  fi
+}
+
+# remote CMD [TIMEOUT]: run one command line on the server; masked output, remote exit status
+remote() {
+  timeout "${2:-120}" ssh "${SSH_OPTS[@]}" -n "$TARGET" "$1" 2>&1 | mask
+  return "${PIPESTATUS[0]}"
+}
+
+# rscript [ARGS...] <<'EOF': run a fixed bash script on the server with positional args.
+# The script arrives on stdin, so anything in it that could read stdin must use </dev/null.
+# Helpers every rscript gets. pgrep -f would also match this script's own shells, whose command lines carry
+# the pattern as an argument, so procs leaves those out.
+REMOTE_FUNCS=$(cat <<'EOF'
+procs() {
+  local p c
+  for p in $(pgrep -f -- "$1"); do
+    c=$({ tr '\0' ' ' < "/proc/$p/cmdline"; } 2>/dev/null) || continue
+    case $c in ""|"bash -s -- "*|*" -c bash -s -- "*) continue ;; esac
+    echo "$p"
+  done
+}
+running() {  # running PORT PROC: the pid listening on PORT, else the first process matching PROC
+  if [ "$1" != - ]; then
+    ss -ltnpH 2>/dev/null | awk -v p=":$1\$" '$4 ~ p' | grep -o 'pid=[0-9]*' | head -n 1 | cut -d= -f2
+  elif [ "$2" != - ]; then
+    procs "$2" | head -n 1
+  fi
+}
+EOF
+)
+
+rscript() {
+  local a="" x
+  for x in "$@"; do a+=" $(q "$x")"; done
+  { printf '%s\n' "$REMOTE_FUNCS"; cat; } | timeout "${RTIMEOUT:-120}" ssh "${SSH_OPTS[@]}" "$TARGET" "bash -s --$a" 2>&1 | mask
+  return "${PIPESTATUS[1]}"
+}
+
+# rwrite DESC CMD [TIMEOUT]: a change on the server; audited, skipped in dry-run
+rwrite() {
+  if [ "$DRY" = 1 ]; then echo "[dry-run] $1: $2"; return 0; fi
+  audit "$1 | $2"
+  remote "$2" "${3:-120}"
+  local rc=$?
+  audit "$1 | exit $rc"
+  return $rc
+}
+
+upload() {  # upload LOCAL REMOTE DESC
+  if [ "$DRY" = 1 ]; then echo "[dry-run] $3: scp $1 -> $S_HOST:$2"; return 0; fi
+  audit "$3 | scp $1 -> $2"
+  timeout 900 scp -q "${SSH_OPTS[@]}" "$1" "$TARGET:$2" 2>&1 | mask
+  local rc=${PIPESTATUS[0]}
+  audit "$3 | exit $rc"
+  return "$rc"
+}
+
+download() {  # download REMOTE LOCAL
+  timeout 300 scp -q "${SSH_OPTS[@]}" "$TARGET:$1" "$2" 2>&1 | mask
+  return "${PIPESTATUS[0]}"
+}
+
+remote_sha() { remote "sha256sum $(q "$1") | cut -c1-64"; }
+
+# a template command, run in the app folder
+in_dir() {
+  local c=$1
+  if [[ $c == *[\;\&\|]* ]]; then
+    c=$(printf '%s' "$c" | sed -E 's/[[:space:];]+$//')
+    if [[ $c == *"&" ]]; then c="{ $c }"; else c="{ $c; }"; fi
+  fi
+  echo "cd $(q "$A_DIR") && $c </dev/null"
+}
+
+active_jar() {  # prints the jar named on the start script's uncommented -jar line(s), without quotes
+  remote "grep -E -- '-jar[[:space:]]+[^[:space:]]+\.jar' $(q "$A_DIR/$A_START") | grep -vE '^[[:space:]]*#' | grep -oE -- '-jar[[:space:]]+[^[:space:]]+\.jar' | awk '{print \$2}'" | tr -d "\"'"
+}
+
+valid_artifact() {
+  [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] && [[ $1 == *"$A_EXT" ]] \
+    || die "name '$1' must use letters, digits, . _ - and end in $A_EXT"
+}
+
+state_file() { echo "$WORK/$KIND.env"; }
+state_load() { local f; f=$(state_file); [ -f "$f" ] && . "$f"; return 0; }
+state_reset() { : > "$(state_file)"; }
+state_set() {
+  local f; f=$(state_file); touch "$f"
+  { grep -v "^$1=" "$f"; printf '%s=%q\n' "$1" "$2"; } > "$f.tmp"
+  mv "$f.tmp" "$f"
+}
+
+# fill PLACEHOLDERS: {new} {dir} {upload_dir} {stamp}
+fill() {
+  local s=$1
+  s=${s//\{new\}/${NEWJAR:-}}
+  s=${s//\{dir\}/$A_DIR}
+  s=${s//\{upload_dir\}/$A_UPLOAD_DIR}
+  s=${s//\{stamp\}/${STAMP:-}}
+  printf '%s' "$s"
+}
+
+need_local() {
+  [ -n "$A_BUILD" ] || die "$A_LABEL has no build in the template"
+  [ -n "$A_LOCAL" ] && [ -d "$A_LOCAL" ] \
+    || die "local repo '$A_REPO' for $A_LABEL is not set or missing ('$A_LOCAL'); set it with uat set repo.$A_REPO /path"
+}
+
+# ---------------------------------------------------------------- templates and settings
+
+cmd_set_password() { python3 "$TPL" save-password ${1:+"$1"}; }
+
+cmd_ping() {
+  local s ids
+  if [ -n "${1:-}" ]; then ids=$1; else ids=$(python3 "$TPL" server-ids) || exit 1; fi
+  for s in $ids; do
+    load_server "$s"
+    echo "[$s] $TARGET (sign-in: $S_AUTH)"
+    connect
+    remote 'echo "connected as $(whoami)@$(hostname); $(java -version 2>&1 | head -n 1); git $(git --version 2>/dev/null | cut -d" " -f3); login shell: $(bash -lc "echo ok" </dev/null 2>&1 | tail -n 1)"'
+  done
+}
+
+cmd_check_paths() {
+  local plan sid tag s a k p args fails=0 out
+  plan=$(python3 "$TPL" check-plan) || exit 1
+  for sid in $(awk -F'\t' '$1 == "SERVER" {print $2}' <<<"$plan"); do
+    load_server "$sid"
+    echo "[$sid] $TARGET"
+    connect
+    args=()
+    while IFS=$'\t' read -r tag s a k p; do
+      [ "$tag" = CHECK ] && [ "$s" = "$sid" ] && args+=("$a" "$k" "$p")
+    done <<<"$plan"
+    out=$(rscript "${args[@]}" <<'EOF'
+while [ $# -ge 3 ]; do
+  a=$1 k=$2 p=$3; shift 3
+  case $k in
+    dir)     [ -d "$p" ] && echo "PASS  [$a] folder $p" || echo "FAIL  [$a] folder $p is missing" ;;
+    exec)    if [ -x "$p" ]; then echo "PASS  [$a] script $p"; elif [ -f "$p" ]; then echo "FAIL  [$a] $p is not executable"; else echo "FAIL  [$a] script $p is missing"; fi ;;
+    file)    [ -f "$p" ] && echo "PASS  [$a] file $p" || echo "FAIL  [$a] file $p is missing" ;;
+    logdir)  [ -d "$p" ] && echo "PASS  [$a] log folder $p" || echo "FAIL  [$a] log folder $p is missing" ;;
+    gitrepo) if (cd "$p" 2>/dev/null && git rev-parse --git-dir </dev/null >/dev/null 2>&1); then echo "PASS  [$a] git repo $p"; else echo "FAIL  [$a] $p is not a git repo"; fi ;;
+  esac
+done
+EOF
+)
+    local rc=$?
+    echo "$out"
+    fails=$((fails + $(grep -c '^FAIL' <<<"$out")))
+    [ "$rc" -eq 0 ] || { echo "FAIL  the checks on $sid did not finish (exit $rc)"; fails=$((fails + 1)); }
+  done
+  APP=-
+  echo
+  [ "$fails" -eq 0 ] && echo "ALL PASS" || { echo "$fails FAIL(s)"; return 2; }
+}
+
+cmd_detect() {  # detect SERVER DIR: read-only look at an app folder, for filling in a template
+  local sid=${1:-} d=${2:-}
+  [ -n "$d" ] || die "usage: uat detect SERVER DIR"
+  load_server "$sid"
+  connect
+  rscript "$d" <<'EOF' | awk '!seen[$0]++'
+d=$1
+cd "$d" 2>/dev/null || { echo "MISSING_DIR=$d"; exit 0; }
+here=$(pwd -P)
+echo "DIR=$here"
+for f in *.sh; do [ -f "$f" ] || continue
+  echo "SCRIPT=$f $([ -x "$f" ] && echo exec || echo noexec)"
+  grep -nE -- '-jar[[:space:]]+[^[:space:]]+\.jar' "$f" | grep -vE '^[0-9]+:[[:space:]]*#' \
+    | sed -E "s/^([0-9]+):.*-jar[[:space:]]+[\"']?([^[:space:]\"']+\.jar).*/JAR_LINE=$f \1 \2/"
+  grep -q '\\$' "$f" && echo "MULTILINE=$f"
+  grep -oE '>>?[[:space:]]*[^[:space:]&;|<>]+\.(log|out|txt)' "$f" | sed -E "s/^(>>?)[[:space:]]*/LOG=$f \1 /"
+  grep -oE -- '(--server\.port|-Dserver\.port)=[0-9]+' "$f" | sed -E "s/.*=/PORT_HINT=$f /"
+  grep -qE '(^|[^a-z])(kill|pkill|fuser)([^a-z]|$)' "$f" && echo "STOPS=$f"
+  grep -qE '(^|[^a-z])(java|nohup|node|python)([^a-z]|$)' "$f" && echo "STARTS=$f"
+done
+ls -1t -- *.jar *.war 2>/dev/null | head -n 8 | sed 's/^/ARTIFACT=/'
+for p in $(ps -u "$(id -un)" -o pid= 2>/dev/null); do
+  [ "$(readlink "/proc/$p/cwd" 2>/dev/null)" = "$here" ] || continue
+  [ "$p" = "$$" ] && continue
+  case "$(ps -o args= -p "$p")" in -*|bash*|/bin/bash*|sh|sh\ *|/bin/sh*|*"bash -s -- "*) continue ;; esac
+  echo "PROC=$p $(ps -o etime= -p "$p" | tr -d ' ') $(ps -o args= -p "$p" | cut -c1-240)"
+  ps -o args= -p "$p" | grep -oE -- '-jar[[:space:]]+[^[:space:]]+\.jar' | head -n 1 | awk -v p="$p" '{print "PROCJAR=" p " " $2}'
+  ss -ltnpH 2>/dev/null | grep "pid=$p," | awk '{print $4}' | sed -E 's/.*:/PORT='"$p"' /'
+done
+EOF
+}
+
+# ---------------------------------------------------------------- free-form read / write
+
+server_flag() { SERVER_ARG=""; if [ "${1:-}" = --server ]; then SERVER_ARG=${2:-}; return 0; fi; return 1; }
+
+cmd_read() {
+  if server_flag "$@"; then shift 2; fi
+  local c=${1:-}
+  python3 "$LIB" check read "$c" || exit 3
+  load_server "$SERVER_ARG"
+  connect
+  remote "$c" 120
+}
+
+cmd_write() {
+  if server_flag "$@"; then shift 2; fi
+  local c=${1:-}
+  python3 "$LIB" check write "$c" || exit 3
+  load_server "$SERVER_ARG"
+  connect
+  rwrite "approved change" "$c"
+}
+
+cmd_get() {
+  if server_flag "$@"; then shift 2; fi
+  local r=${1:-}
+  [ -n "$r" ] || die "usage: uat get [--server ID] REMOTE_FILE"
+  load_server "$SERVER_ARG"
+  connect
+  local size
+  size=$(remote "stat -c %s $(q "$r")") || die "$r not found"
+  [ "$size" -le 52428800 ] 2>/dev/null || die "$r is $((size / 1048576)) MB; read parts of it with uat read (tail/grep) instead"
+  mkdir -p "$CACHE_DIR/work/files"
+  local l=$CACHE_DIR/work/files/$(basename "$r")
+  download "$r" "$l" || die "download failed"
+  echo "LOCAL_COPY=$l"
+}
+
+cmd_log() {
+  load_app "${1:-}"
+  [ -n "$A_LOG" ] || die "the template sets no log file for $A_LABEL"
+  connect
+  remote "tail -n $(( ${2:-60} + 0 )) $(q "$A_LOG") | cut -c1-400"
+}
+
+cmd_audit() { tail -n "${1:-30}" "$AUDIT" 2>/dev/null || echo "audit log is empty"; }
+
+# ---------------------------------------------------------------- deploy
+
+cmd_current() {
+  load_app "${1:-}"
+  connect
+  local out
+  out=$(rscript "$A_DIR" "${A_START:--}" "${A_PORT:--}" "${A_PROCESS:--}" <<'EOF'
+d=$1 s=$2 port=$3 proc=$4
+cd "$d" || { echo "MISSING_DIR=$d"; exit 3; }
+if [ "$s" != - ]; then
+  echo "START_SCRIPT=$d/$s"
+  grep -nE -- '-jar[[:space:]]+[^[:space:]]+\.jar' "$s" | grep -vE '^[0-9]+:[[:space:]]*#' \
+    | sed -E "s/^([0-9]+):.*-jar[[:space:]]+[\"']?([^[:space:]\"']+\.jar).*/ACTIVE_JAR=\2 (line \1)/"
+fi
+if [ "$port" = - ] && [ "$proc" = - ]; then echo "RUNNING=unknown (the template sets no port or process match)"; exit 0; fi
+pid=$(running "$port" "$proc")
+if [ -n "$pid" ]; then
+  echo "RUNNING=yes $([ "$port" != - ] && echo "PORT=$port ")PID=$pid UPTIME=$(ps -o etime= -p "$pid" | tr -d ' ')"
+  ps -o args= -p "$pid" | grep -oE -- '-jar[[:space:]]+[^[:space:]]+\.jar' | awk '{print "RUNNING_JAR=" $2}'
+  [ "$s" = - ] && echo "RUNNING_CMD=$(ps -o args= -p "$pid" | cut -c1-200)"
+else
+  echo "RUNNING=no$([ "$port" != - ] && echo " PORT=$port")"
+fi
+EOF
+)
+  echo "$out"
+  [ "$A_STYLE" = none ] && return 0
+  local br="" slug="" cur stem
+  if [ -n "$A_LOCAL" ] && br=$(git -C "$A_LOCAL" rev-parse --abbrev-ref HEAD 2>/dev/null); then
+    slug=$(printf '%s' "${br##*/}" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9.-' '-')
+    case "$A_PREFIX" in *"$slug") slug= ;; esac
+    echo "LOCAL_BRANCH=$br"
+  fi
+  echo "SUGGESTED_NAME=${A_PREFIX}-$(date +%b-%-d | tr 'A-Z' 'a-z')${slug:+-$slug}$A_EXT"
+  # the current name with -v2, or the next -vN when it already has one
+  cur=$(sed -n 's/^ACTIVE_JAR=\([^ ]*\).*/\1/p' <<<"$out" | head -n 1)
+  cur=${cur##*/}
+  if [ -n "$cur" ]; then
+    stem=${cur%"$A_EXT"}
+    if [[ $stem =~ ^(.*-v)([0-9]+)$ ]]; then
+      echo "APPEND_NAME=${BASH_REMATCH[1]}$((BASH_REMATCH[2] + 1))$A_EXT"
+    else
+      echo "APPEND_NAME=$stem-v2$A_EXT"
+    fi
+  fi
+  return 0
+}
+
+list_artifacts() {
+  find "$A_LOCAL/$A_OUT_DIR" -maxdepth 1 -type f -name "$A_OUT_GLOB" ! -name '*-sources.jar' ! -name '*-javadoc.jar' ! -name '*-plain.jar' 2>/dev/null | sort
+}
+
+cmd_build() {
+  load_app "${1:-}"
+  [ "$A_STYLE" != none ] || die "$A_LABEL is restart only in the template; there is nothing to build"
+  need_local
+  cd "$A_LOCAL" || die "cannot enter $A_LOCAL"
+  if git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "SOURCE=$(git rev-parse --abbrev-ref HEAD) @ $(git log -1 --format='%h %s')"
+    echo "UNCOMMITTED_FILES=$(git status --porcelain | wc -l)"
+    git status --short | head -n 20
+  fi
+  local log=$WORK/build.log
+  echo "BUILD=$A_BUILD   (in $A_LOCAL, log $log)"
+  if [ "$DRY" = 1 ]; then echo "[dry-run] build skipped"; return 0; fi
+  bash -c "$A_BUILD" > "$log" 2>&1
+  local rc=$?
+  if grep -qE '\[ERROR\]|BUILD (SUCCESS|FAILURE)|BUILD SUCCESSFUL|BUILD FAILED|npm ERR!' "$log"; then
+    grep -E '\[ERROR\]|BUILD (SUCCESS|FAILURE)|Total time|BUILD SUCCESSFUL|BUILD FAILED|FAILURE:|npm ERR!' "$log" | tail -n 30
+  else
+    tail -n 15 "$log"
+  fi
+  [ $rc -eq 0 ] || die "build failed (exit $rc); full log: $log"
+  list_artifacts | sed 's/^/BUILT=/'
+}
+
+cmd_rename() {
+  load_app "${1:-}"
+  local new=${2:-}
+  valid_artifact "$new"
+  need_local
+  local jd=$A_LOCAL/$A_OUT_DIR files
+  mapfile -t files < <(list_artifacts)
+  if [ "${#files[@]}" -eq 1 ] && [ "$(basename "${files[0]}")" = "$new" ]; then
+    echo "ALREADY_NAMED=$new"
+  elif [ "${#files[@]}" -ne 1 ]; then
+    die "expected exactly one $A_OUT_GLOB in $jd, found ${#files[@]}: ${files[*]##*/}"
+  else
+    [ -e "$jd/$new" ] && die "$jd/$new already exists"
+    mv -n "${files[0]}" "$jd/$new" || die "rename failed"
+    echo "RENAMED=$(basename "${files[0]}") -> $new"
+  fi
+  state_reset
+  state_set NEWJAR "$new"
+  state_set LOCAL_JAR "$jd/$new"
+  state_set LOCAL_SHA "$(sha "$jd/$new")"
+  echo "LOCAL_FILE=$jd/$new"
+  echo "SIZE=$(du -h "$jd/$new" | cut -f1)"
+  echo "SHA256=$(sha "$jd/$new")"
+}
+
+cmd_preflight() {
+  load_app "${1:-}"
+  [ "$A_STYLE" != none ] || die "$A_LABEL is restart only in the template; it is not deployed"
+  local new=${2:-}
+  valid_artifact "$new"
+  state_load
+  state_set PREFLIGHT_OK 0
+  local fails=0 size_kb=0 out rc orig_sha
+  if [ "${NEWJAR:-}" = "$new" ] && [ -f "${LOCAL_JAR:-}" ] && [ "$(sha "$LOCAL_JAR")" = "${LOCAL_SHA:-}" ]; then
+    echo "PASS  local file $LOCAL_JAR ($(du -h "$LOCAL_JAR" | cut -f1))"
+    size_kb=$(du -k "$LOCAL_JAR" | cut -f1)
+  else
+    echo "FAIL  local file $new is not built and renamed yet (build, then rename)"
+    fails=$((fails + 1))
+  fi
+  connect
+  out=$(rscript "$A_DIR" "${A_START_EXEC:--}" "${A_STOP_EXEC:--}" "${A_LOG:--}" "$new" "$size_kb" "${A_PORT:--}" "${A_PROCESS:--}" "$A_UPLOAD_DIR" "${A_START:--}" <<'EOF'
+d=$1 s=$2 t=$3 l=$4 j=$5 kb=$6 port=$7 proc=$8 up=$9 js=${10}
+[ -d "$d" ] && echo "PASS  app folder $d" || { echo "FAIL  app folder $d is missing"; exit 0; }
+[ "$s" = - ] || { [ -x "$d/$s" ] && echo "PASS  start script $s" || echo "FAIL  start script $d/$s is missing or not executable"; }
+[ "$t" = - ] || { [ -x "$d/$t" ] && echo "PASS  stop script $t" || echo "FAIL  stop script $d/$t is missing or not executable"; }
+[ "$js" = - ] || [ "$js" = "$s" ] || { [ -f "$d/$js" ] && echo "PASS  start script $js" || echo "FAIL  start script $d/$js is missing"; }
+[ "$l" = - ] || { [ -d "$(dirname "$l")" ] && echo "PASS  log folder $(dirname "$l")" || echo "FAIL  log folder $(dirname "$l") is missing"; }
+[ -d "$up" ] || { echo "FAIL  upload folder $up is missing"; exit 0; }
+[ -e "$up/$j" ] && echo "FAIL  $j already exists in $up; choose another name" || echo "PASS  $j is a new name in $up"
+read -r free use < <(df -Pk "$up" | awk 'NR == 2 {print $4, $5}')
+use=${use%\%}
+need=$((kb * 2 + 524288))
+if [ "$free" -lt "$need" ]; then echo "FAIL  disk: $((free / 1024)) MB free, need $((need / 1024)) MB"
+elif [ "$use" -ge 90 ]; then echo "WARN  disk ${use}% used, $((free / 1024)) MB free"
+else echo "PASS  disk ${use}% used, $((free / 1024)) MB free"; fi
+if [ "$port" = - ] && [ "$proc" = - ]; then
+  echo "INFO  the template sets no port or process match, so the running state is unknown"
+else
+  pid=$(running "$port" "$proc")
+  if [ -n "$pid" ]; then
+    echo "INFO  running now: $(ps -o args= -p "$pid" | grep -oE -- '-jar[[:space:]]+[^[:space:]]+\.jar' | awk '{print $2}') (pid $pid, up $(ps -o etime= -p "$pid" | tr -d ' '))"
+  else
+    echo "WARN  $([ "$port" != - ] && echo "nothing is listening on port $port" || echo "no process matches '$proc'") right now"
+  fi
+fi
+[ "$js" = - ] || echo "ORIG_SHA=$(sha256sum "$d/$js" | cut -c1-64)"
+EOF
+)
+  rc=$?
+  grep -v '^ORIG_SHA=' <<<"$out"
+  fails=$((fails + $(grep -c '^FAIL' <<<"$out")))
+  if [ "$rc" -ne 0 ]; then
+    echo "FAIL  the checks on $S_ID did not finish (exit $rc); the results above may be incomplete"
+    fails=$((fails + 1))
+  fi
+  if [ "$A_STYLE" = jar-start-script ]; then
+    orig_sha=$(sed -n 's/^ORIG_SHA=//p' <<<"$out")
+    if [[ $orig_sha =~ ^[0-9a-f]{64}$ ]]; then
+      local orig=$WORK/$A_START.orig edited=$WORK/$A_START.new
+      if download "$A_DIR/$A_START" "$orig" && [ "$(sha "$orig")" = "$orig_sha" ]; then
+        echo
+        echo "START SCRIPT CHANGE ($A_EDIT mode)"
+        if python3 "$LIB" swapjar "$A_EDIT" "$orig" "$new" "$edited" "$A_DIR"; then
+          state_set ORIG_SHA "$orig_sha"
+          state_set EDITED "$edited"
+        else
+          fails=$((fails + 1))
+        fi
+      else
+        echo "FAIL  could not download $A_START intact"
+        fails=$((fails + 1))
+      fi
+    else
+      echo "FAIL  could not read $A_START on $S_ID, so there is no start-script change to show"
+      fails=$((fails + 1))
+    fi
+  else
+    local stamp i
+    stamp=$(date +%Y%m%d-%H%M%S)
+    state_set STAMP "$stamp"
+    NEWJAR=$new STAMP=$stamp
+    echo
+    echo "UPLOAD  $new -> $A_UPLOAD_DIR/$new"
+    if [ "${#A_STEPS[@]}" -eq 0 ]; then echo "STEPS   none: the upload is followed by a restart"; fi
+    for i in "${!A_STEPS[@]}"; do echo "STEP $((i + 1))  $(fill "${A_STEPS[$i]}")"; done
+    for i in "${!A_ROLLBACK[@]}"; do echo "ROLLBACK $((i + 1))  $(fill "${A_ROLLBACK[$i]}")"; done
+    [ "${#A_ROLLBACK[@]}" -gt 0 ] || echo "ROLLBACK none in the template: a failed deploy is undone by hand"
+  fi
+  echo
+  if [ "$fails" -eq 0 ]; then
+    state_set PREFLIGHT_OK 1
+    state_set PREFLIGHT_JAR "$new"
+    echo "VERDICT=READY"
+  else
+    echo "VERDICT=NOT READY ($fails check(s) failed)"
+    exit 2
+  fi
+}
+
+cmd_push() {
+  load_app "${1:-}"
+  state_load
+  [ "${PREFLIGHT_OK:-0}" = 1 ] && [ "${PREFLIGHT_JAR:-}" = "${NEWJAR:-}" ] || die "run preflight first, and pass it"
+  [ "$(sha "$LOCAL_JAR")" = "$LOCAL_SHA" ] || die "local file changed since preflight; run rename and preflight again"
+  connect
+  if [ "$A_STYLE" = custom ]; then push_custom; return; fi
+  step "[1/4] copy $NEWJAR to $A_DIR"
+  [ "$(remote "test -e $(q "$A_DIR/$NEWJAR") && echo EXISTS")" = EXISTS ] && die "$A_DIR/$NEWJAR already exists; nothing changed"
+  upload "$LOCAL_JAR" "$A_DIR/$NEWJAR" "copy jar" || die "copy failed; a partial $NEWJAR may be left in $A_DIR, nothing else changed"
+  if [ "$DRY" = 0 ]; then
+    [ "$(remote_sha "$A_DIR/$NEWJAR")" = "$LOCAL_SHA" ] || die "checksum of $NEWJAR on $S_ID does not match the local jar; start script untouched"
+    echo "copied, checksum matches"
+  fi
+  step "[2/4] check $A_START is unchanged since preflight"
+  [ "$(remote_sha "$A_DIR/$A_START")" = "$ORIG_SHA" ] || die "$A_START changed on $S_ID since preflight; run preflight again. The new jar is copied, nothing else changed"
+  echo "unchanged"
+  step "[3/4] back up $A_START"
+  local bak
+  bak=$A_START.bak-$(date +%Y%m%d-%H%M%S)
+  rwrite "back up start script" "cd $(q "$A_DIR") && cp -np $(q "$A_START") $(q "$bak") && test -f $(q "$bak") && echo 'backup: $bak'" \
+    || die "backup failed; start script untouched"
+  [ "$DRY" = 0 ] && state_set BACKUP "$bak"
+  step "[4/4] update $A_START to run $NEWJAR"
+  upload "$EDITED" "$A_DIR/$A_START" "update start script" || die "upload of the edited start script failed; restore it with rollback"
+  if [ "$DRY" = 0 ]; then
+    [ "$(remote "sha256sum $(q "$A_DIR/$A_START") | cut -c1-64; test -x $(q "$A_DIR/$A_START") || echo NOT_EXECUTABLE")" = "$(sha "$EDITED")" ] \
+      || die "$A_START on $S_ID does not match the approved edit, or lost its execute bit; restore it with rollback"
+    state_set PUSHED 1
+  fi
+  echo
+  echo "PUSH OK: $NEWJAR is in $A_DIR and $A_START now runs it (backup $bak)"
+}
+
+push_custom() {
+  local n=$(( ${#A_STEPS[@]} + 1 )) i c
+  step "[1/$n] upload $NEWJAR to $A_UPLOAD_DIR"
+  [ "$(remote "test -e $(q "$A_UPLOAD_DIR/$NEWJAR") && echo EXISTS")" = EXISTS ] && die "$A_UPLOAD_DIR/$NEWJAR already exists; nothing changed"
+  upload "$LOCAL_JAR" "$A_UPLOAD_DIR/$NEWJAR" "upload" || die "upload failed; a partial $NEWJAR may be left in $A_UPLOAD_DIR, nothing else changed"
+  if [ "$DRY" = 0 ]; then
+    [ "$(remote_sha "$A_UPLOAD_DIR/$NEWJAR")" = "$LOCAL_SHA" ] || die "checksum of $NEWJAR on $S_ID does not match the local file; no steps run"
+    echo "uploaded, checksum matches"
+  fi
+  for i in "${!A_STEPS[@]}"; do
+    c=$(fill "${A_STEPS[$i]}")
+    step "[$((i + 2))/$n] $c"
+    rwrite "deploy step $((i + 1))" "$(in_dir "$c")" || die "step $((i + 1)) failed; the steps before it ran, the ones after it did not"
+  done
+  [ "$DRY" = 0 ] && state_set PUSHED 1
+  echo
+  echo "PUSH OK: $NEWJAR is in $A_UPLOAD_DIR and ${#A_STEPS[@]} step(s) ran"
+}
+
+cmd_restart() {
+  load_app "${1:-}"
+  connect
+  local jar="" n out t0 elapsed res="" off=0 alive=- signals=0
+  if [ "$A_STYLE" = jar-start-script ]; then
+    jar=$(active_jar)
+    n=$(grep -c . <<<"$jar")
+    [ "$n" -eq 1 ] || die "$A_START must have exactly one active -jar line, found $n"
+    alive="jar:${jar##*/}"
+  elif [ -n "$A_PROCESS" ]; then
+    alive="proc:$A_PROCESS"
+  fi
+  step "[1/3] stop $A_LABEL ($A_STOP_CMD${A_PORT:+, port $A_PORT})"
+  rwrite "stop" "$(in_dir "$A_STOP_CMD")" 60 || die "stop command failed; not starting"
+  if [ "$DRY" = 0 ]; then
+    local i=0
+    if [ -n "$A_PORT" ]; then
+      while [ "$(remote "ss -ltnH | awk '{print \$4}' | grep -cE ':$A_PORT\$'")" != 0 ]; do
+        i=$((i + 1))
+        [ "$i" -ge "$A_STOP_TIMEOUT" ] && die "port $A_PORT is still in use after ${A_STOP_TIMEOUT}s; not starting"
+        sleep 1
+      done
+      echo "port $A_PORT is free"
+    elif [ -n "$A_PROCESS" ]; then
+      while [ -n "$(rscript "$A_PROCESS" <<'EOF'
+procs "$1"
+EOF
+)" ]; do
+        i=$((i + 1))
+        [ "$i" -ge "$A_STOP_TIMEOUT" ] && die "a process matching '$A_PROCESS' is still running after ${A_STOP_TIMEOUT}s; not starting"
+        sleep 1
+      done
+      echo "no process matches '$A_PROCESS'"
+    else
+      echo "the template sets no port or process match, so the stop is not checked"
+    fi
+  fi
+  step "[2/3] start $A_LABEL ($A_START_CMD${jar:+ -> $jar})"
+  [ -n "$A_LOG" ] && off=$(remote "stat -c %s $(q "$A_LOG") 2>/dev/null || echo 0")
+  rwrite "start" "cd $(q "$A_DIR") && bash -lc $(q "$A_START_CMD") </dev/null" 60 || die "start command returned an error"
+  [ -n "$A_LOG" ] && [ -n "$A_READY_LOG" ] && signals=$((signals + 1))
+  [ -n "$A_PORT" ] && signals=$((signals + 1))
+  [ -n "$A_READY_URL" ] && signals=$((signals + 1))
+  step "[3/3] wait until ready: $( [ -n "$A_LOG" ] && [ -n "$A_READY_LOG" ] && printf "log line /%s/, " "$A_READY_LOG")$( [ -n "$A_PORT" ] && printf "port %s open, " "$A_PORT")$( [ -n "$A_READY_URL" ] && printf "%s answers, " "$A_READY_URL")up to ${A_START_TIMEOUT}s"
+  if [ "$DRY" = 1 ]; then echo "[dry-run] would watch from byte $off"; return 0; fi
+  t0=$SECONDS
+  while :; do
+    sleep 5
+    elapsed=$((SECONDS - t0))
+    out=$(rscript "${A_LOG:--}" "$off" "${A_PORT:--}" "$alive" "${A_READY_LOG:--}" "${A_READY_FAIL:--}" "${A_READY_URL:--}" <<'EOF'
+f=$1 o=$2 port=$3 alive=$4 okre=$5 failre=$6 url=$7
+if [ "$f" != - ]; then
+  s=$(stat -c %s "$f" 2>/dev/null || echo 0)
+  if [ "$s" -lt "$o" ]; then echo "@@TRUNCATED"; o=0; fi
+  [ "$okre" = - ] || tail -c +$((o + 1)) "$f" 2>/dev/null | grep -a -m 1 -E -- "$okre" | cut -c1-300 | sed 's/^/@@STARTED /'
+  [ "$failre" = - ] || { tail -c +$((o + 1)) "$f" 2>/dev/null | grep -a -q -E -- "$failre" && echo "@@FAILED"; }
+fi
+[ "$port" = - ] || { ss -ltnH 2>/dev/null | awk '{print $4}' | grep -qE ":$port\$" && echo "@@LISTENING"; }
+case $alive in
+  jar:*) ps -C java -o args= 2>/dev/null | grep -qF -- "${alive#jar:}" && echo "@@ALIVE" ;;
+  proc:*) procs "${alive#proc:}" | grep -q . && echo "@@ALIVE" ;;
+esac
+[ "$url" = - ] || { curl -sf -o /dev/null --max-time 5 -- "$url" </dev/null && echo "@@HEALTHY"; }
+EOF
+)
+    grep -q '^@@TRUNCATED' <<<"$out" && off=0
+    local ok=1
+    if [ -n "$A_LOG" ] && [ -n "$A_READY_LOG" ] && ! grep -q '^@@STARTED' <<<"$out"; then ok=0; fi
+    if [ -n "$A_PORT" ] && ! grep -q '^@@LISTENING' <<<"$out"; then ok=0; fi
+    if [ -n "$A_READY_URL" ] && ! grep -q '^@@HEALTHY' <<<"$out"; then ok=0; fi
+    if [ "$signals" -eq 0 ] && [ "$alive" != - ] && ! grep -q '^@@ALIVE' <<<"$out"; then ok=0; fi
+    if [ "$ok" = 1 ]; then
+      res=ok
+      echo "${elapsed}s: $(sed -n 's/^@@STARTED //p' <<<"$out")$( [ "$signals" -eq 0 ] && echo "started; the template sets no ready check")"
+      break
+    fi
+    if grep -q '^@@FAILED' <<<"$out"; then res="the log matched the failure pattern /$A_READY_FAIL/"; break; fi
+    if [ "$alive" != - ] && [ "$elapsed" -ge 15 ] && ! grep -q '^@@ALIVE' <<<"$out" && ! grep -q '^@@LISTENING' <<<"$out"; then
+      res="the process for ${jar:-$A_PROCESS} is gone"; break
+    fi
+    if [ "$elapsed" -ge "$A_START_TIMEOUT" ]; then res="not ready within ${A_START_TIMEOUT}s"; break; fi
+    echo "${elapsed}s: $( [ "$alive" = - ] && echo 'process not tracked' || { grep -q '^@@ALIVE' <<<"$out" && echo 'process up' || echo 'no process yet'; })$( [ -n "$A_PORT" ] && { grep -q '^@@LISTENING' <<<"$out" && echo ", port $A_PORT open" || echo ", port $A_PORT not open yet"; })$( [ -n "$A_READY_URL" ] && { grep -q '^@@HEALTHY' <<<"$out" && echo ", health URL answers" || echo ", health URL not answering yet"; })"
+  done
+  if [ "$res" = ok ]; then
+    audit "restart | ok | ${jar:--}"
+    echo
+    echo "RESTART OK: $A_LABEL is running${jar:+ $jar}"
+    return 0
+  fi
+  audit "restart | FAILED | ${jar:--} | $res"
+  echo
+  if [ -n "$A_LOG" ]; then
+    rscript "$A_LOG" "$off" <<'EOF'
+f=$1 o=$2
+s=$(stat -c %s "$f" 2>/dev/null || echo 0); [ "$s" -lt "$o" ] && o=0
+echo "--- error lines since the start"
+tail -c +$((o + 1)) "$f" | grep -a -n -E 'ERROR|Exception|Caused by|FAILED|Error:' | tail -n 20 | cut -c1-300
+echo "--- last 25 lines"
+tail -c +$((o + 1)) "$f" | tail -n 25 | cut -c1-300
+EOF
+  fi
+  die "restart of $A_LABEL failed: $res"
+}
+
+cmd_rollback() {
+  load_app "${1:-}"
+  state_load
+  connect
+  if [ "$A_STYLE" = custom ]; then
+    [ "${#A_ROLLBACK[@]}" -gt 0 ] || die "the template has no rollback steps for $A_LABEL; undo the deploy by hand"
+    [ -n "${NEWJAR:-}" ] || die "no deploy recorded for $APP"
+    local i c
+    for i in "${!A_ROLLBACK[@]}"; do
+      c=$(fill "${A_ROLLBACK[$i]}")
+      step "[$((i + 1))/${#A_ROLLBACK[@]}] $c"
+      rwrite "rollback step $((i + 1))" "$(in_dir "$c")" || die "rollback step $((i + 1)) failed"
+    done
+    echo "ROLLED BACK: ${#A_ROLLBACK[@]} step(s) ran. $NEWJAR stays in $A_UPLOAD_DIR. Restart to bring the previous version up."
+    return 0
+  fi
+  [ "$A_STYLE" = jar-start-script ] || die "$A_LABEL is restart only; there is nothing to roll back"
+  [ -n "${BACKUP:-}" ] || die "no start-script backup recorded for $APP"
+  [ "$(remote "test -f $(q "$A_DIR/$BACKUP") && echo OK")" = OK ] || die "backup $A_DIR/$BACKUP not found"
+  rwrite "roll back start script" "cd $(q "$A_DIR") && cp -p $(q "$BACKUP") $(q "$A_START")" || die "rollback copy failed"
+  if [ "$DRY" = 0 ]; then
+    [ "$(remote_sha "$A_DIR/$A_START")" = "$ORIG_SHA" ] || die "$A_START does not match the pre-deploy version after rollback"
+  fi
+  echo "ROLLED BACK: $A_START restored from $BACKUP (runs $(active_jar) again). $NEWJAR stays in $A_DIR. Restart to bring the previous jar up."
+}
+
+# ---------------------------------------------------------------- config
+
+need_config_app() {
+  load_app "${1:-}" "${2:--}"
+  KIND=config-$C_ID
+  mkdir -p "$WORK/config-$C_ID"
+  CFG_NAME=$(basename "$C_PATH")
+}
+
+config_state_check() {  # prints PASS/FAIL lines and SHA= for the server copy
+  rscript "$C_PATH" "${C_GIT_REPO:--}" "${C_REL:--}" <<'EOF'
+p=$1 repo=$2 rel=$3
+[ -f "$p" ] || { echo "FAIL  $p is missing"; exit 0; }
+if [ "$repo" != - ]; then
+  cd "$repo" || { echo "FAIL  git repo $repo is missing"; exit 0; }
+  if ! st=$(GIT_OPTIONAL_LOCKS=0 git status --porcelain -- "$rel" </dev/null 2>&1); then
+    echo "FAIL  git status failed in $repo: $st"
+  elif [ -n "$st" ]; then
+    echo "FAIL  $rel has uncommitted changes ($st); someone else is editing it"
+  else
+    echo "PASS  $rel has no uncommitted changes"
+  fi
+  echo "HEAD=$(git log -1 --format='%h %s' </dev/null)"
+else
+  echo "INFO  not in a git repo: a .bak copy is made before the upload"
+fi
+echo "SHA=$(sha256sum "$p" | cut -c1-64)"
+EOF
+}
+
+cmd_config_pull() {
+  need_config_app "$@"
+  connect
+  local out s
+  out=$(config_state_check)
+  grep -v '^SHA=' <<<"$out"
+  grep -q '^FAIL' <<<"$out" && die "not safe to edit $CFG_NAME right now"
+  s=$(sed -n 's/^SHA=//p' <<<"$out")
+  [[ $s =~ ^[0-9a-f]{64}$ ]] || die "could not read $C_PATH"
+  local orig=$WORK/config-$C_ID/$CFG_NAME.orig edit=$WORK/config-$C_ID/$CFG_NAME
+  download "$C_PATH" "$orig" || die "download failed"
+  [ "$(sha "$orig")" = "$s" ] || die "downloaded copy does not match the server"
+  cp "$orig" "$edit"
+  state_reset
+  state_set CFG_SHA "$s"
+  state_set CFG_ORIG "$orig"
+  state_set CFG_EDIT "$edit"
+  echo "SERVER_COPY=$orig   (reference, do not edit)"
+  echo "EDIT_COPY=$edit"
+  echo "FORMAT=$C_FORMAT"
+  echo "COMMIT=$([ -n "$C_GIT_REPO" ] && echo "yes, in $C_GIT_REPO" || echo "no, backed up before upload")"
+  echo "VERIFY=$([ -n "$C_VERIFY_URL" ] && [ "$C_FORMAT" = yaml ] && echo "$C_VERIFY_URL" || echo no)"
+  echo "SERVED_BY=${C_SERVED_BY:-none}"
+  echo "RESTART_AFTER=${C_RESTART[*]:-}"
+}
+
+cmd_config_diff() {
+  need_config_app "$@"
+  state_load
+  [ -f "${CFG_EDIT:-}" ] || die "run config-pull first"
+  python3 "$LIB" format-check "$C_FORMAT" "$CFG_EDIT"
+  local rc=$?
+  if [ "$C_FORMAT" = yaml ]; then
+    python3 "$LIB" yaml-diff "$CFG_ORIG" "$CFG_EDIT"
+  else
+    python3 "$LIB" text-diff "$CFG_ORIG" "$CFG_EDIT"
+  fi
+  return $rc
+}
+
+cmd_config_push() {
+  local app=${1:-} cfg=- msg
+  if [ $# -ge 3 ]; then cfg=$2; msg=$3; else msg=${2:-}; fi
+  need_config_app "$app" "$cfg"
+  [ -n "$msg" ] || die "usage: uat config-push APP [CFG] 'commit message'"
+  state_load
+  [ -f "${CFG_EDIT:-}" ] || die "run config-pull first"
+  python3 "$LIB" format-check "$C_FORMAT" "$CFG_EDIT" >/dev/null || die "edited file does not pass the $C_FORMAT check; nothing uploaded"
+  cmp -s "$CFG_ORIG" "$CFG_EDIT" && die "edited copy is identical to the server's; nothing to push"
+  if [ -n "$C_GIT_REPO" ]; then
+    [ -n "${GIT_NAME:-}" ] && [ -n "${GIT_EMAIL:-}" ] || die "your git identity is not set; uat set git.name ... and uat set git.email ..."
+  fi
+  connect
+  local out
+  out=$(config_state_check)
+  grep -q '^FAIL' <<<"$out" && { grep '^FAIL' <<<"$out"; die "nothing uploaded"; }
+  [ "$(sed -n 's/^SHA=//p' <<<"$out")" = "$CFG_SHA" ] || die "$CFG_NAME changed on $S_ID since config-pull; pull again. Nothing uploaded"
+  if [ -z "$C_GIT_REPO" ]; then
+    step "[1/2] back up $CFG_NAME"
+    local bak
+    bak=$C_PATH.bak-$(date +%Y%m%d-%H%M%S)
+    rwrite "back up config" "cp -np $(q "$C_PATH") $(q "$bak") && test -f $(q "$bak") && echo 'backup: $bak'" || die "backup failed; nothing uploaded"
+    [ "$DRY" = 0 ] && state_set CFG_BACKUP "$bak"
+    step "[2/2] upload $CFG_NAME"
+  else
+    step "[1/2] upload $CFG_NAME"
+  fi
+  upload "$CFG_EDIT" "$C_PATH" "upload config" || die "upload failed"
+  if [ "$DRY" = 0 ]; then
+    [ "$(remote_sha "$C_PATH")" = "$(sha "$CFG_EDIT")" ] || die "$CFG_NAME on $S_ID does not match the approved edit"
+    echo "uploaded, checksum matches"
+  fi
+  if [ -n "$C_GIT_REPO" ]; then
+    step "[2/2] commit $C_REL as $GIT_NAME"
+    out=$(rwrite "commit config" "cd $(q "$C_GIT_REPO") && git add -- $(q "$C_REL") && git -c user.name=$(q "$GIT_NAME") -c user.email=$(q "$GIT_EMAIL") commit -q -m $(q "$msg") -- $(q "$C_REL") && git log -1 --format='COMMIT=%h %s'") \
+      || { echo "$out"; die "commit failed; $CFG_NAME is uploaded but not committed"; }
+    echo "$out"
+    [ "$DRY" = 0 ] && state_set CFG_COMMIT "$(sed -n 's/^COMMIT=\([0-9a-f]*\).*/\1/p' <<<"$out")"
+  fi
+  echo
+  echo "CONFIG PUSH OK. To apply it, restart: ${C_RESTART[*]:-the app that reads it}"
+}
+
+cmd_config_verify() {
+  local app=${1:-} cfg=- key=
+  if [ $# -ge 3 ]; then cfg=$2; key=$3; else key=${2:-}; fi
+  need_config_app "$app" "$cfg"
+  state_load
+  [ -n "$C_VERIFY_URL" ] || { echo "SERVED=unknown: the template sets no URL that serves $CFG_NAME; check the app's log after its restart"; exit 2; }
+  [ "$C_FORMAT" = yaml ] || { echo "SERVED=unknown: served values are compared for YAML files only"; exit 2; }
+  [ -f "${CFG_ORIG:-}" ] && [ -f "${CFG_EDIT:-}" ] || die "no pulled copy of $CFG_NAME to compare with; run config-pull first"
+  connect
+  local served=$WORK/config-$C_ID/$CFG_NAME.served
+  remote "curl -sf --max-time 10 $(q "$C_VERIFY_URL")" > "$served" || { echo "SERVED=no: $C_VERIFY_URL did not answer"; exit 2; }
+  python3 "$LIB" yaml-served "$CFG_ORIG" "$CFG_EDIT" "$served" ${key:+"$key"} || exit 2
+}
+
+cmd_config_revert() {
+  need_config_app "$@"
+  state_load
+  connect
+  if [ -n "$C_GIT_REPO" ]; then
+    [ -n "${CFG_COMMIT:-}" ] || die "no config commit recorded for $APP/$C_ID"
+    rwrite "revert config commit" "cd $(q "$C_GIT_REPO") && git -c user.name=$(q "$GIT_NAME") -c user.email=$(q "$GIT_EMAIL") revert --no-edit $(q "$CFG_COMMIT") </dev/null && git log -1 --format='COMMIT=%h %s'" \
+      || die "revert failed"
+    echo "REVERTED $CFG_COMMIT. Restart: ${C_RESTART[*]:-the app that reads it}"
+  else
+    [ -n "${CFG_BACKUP:-}" ] || die "no config backup recorded for $APP/$C_ID"
+    rwrite "restore config backup" "cp -p $(q "$CFG_BACKUP") $(q "$C_PATH")" || die "restore failed"
+    if [ "$DRY" = 0 ]; then
+      [ "$(remote_sha "$C_PATH")" = "$CFG_SHA" ] || die "$CFG_NAME does not match the pre-change version after the restore"
+    fi
+    echo "RESTORED $CFG_NAME from $CFG_BACKUP. Restart: ${C_RESTART[*]:-the app that reads it}"
+  fi
+}
+
+usage() {
+  cat <<'EOF'
+uat [--dry-run] COMMAND        (APP = an app id of the chosen template; uat apps lists them)
+
+templates and settings
+  templates                    list the templates (* = chosen)
+  use ID                       choose the template the other commands work on
+  configure [ID | --new]       open the template configurator in the browser; prints SAVED= lines when closed
+  mode [ui | terminal]         show or set how /uat-deploy runs on this machine: in the terminal (default) or in the console page
+  console [APP] [--view V]     open the console page (UI mode): deploy, config, ask, activity, templates, all in the browser
+                               V: apps, config (with APP), ask, activity, templates
+  console --wait               block until the page finishes an operation or closes; prints what happened
+  template-check [ID|FILE]     validate a template
+  apps                         apps of the chosen template
+  instructions [APP]           the template's instructions and server notes (and one app's); read before working
+  setup-status                 what is configured on this machine, what is missing
+  set KEY VALUE                save a setting for this machine: git.name, git.email, repo.NAME, build.APP,
+                               config-dir, auth.SERVER (key | key:/path/to/private_key | password)
+  set-password [SERVER]        save a server's password, read from stdin (sign-in becomes password)
+  show                         the chosen template with this machine's values
+  ping [SERVER]                log in and print host, user, java, git
+  check-paths                  verify every folder, script, log folder and config file of the template exists
+  detect SERVER DIR            read-only look at a folder: scripts, java -jar lines, logs, processes, ports
+  audit [N]                    last N audit-log lines
+
+read only
+  read [--server ID] 'CMD'     run an allow-listed read-only command
+  get [--server ID] FILE       download a file (up to 50 MB) for reading
+  log APP [N]                  last N lines of the app log
+  current APP                  active jar, running state, suggested new name
+  preflight APP NAME           deployment checklist and the change it will make; nothing changes
+
+local
+  build APP                    show source branch and commit, run the build
+  rename APP NAME              rename the built file in the local output folder (rename-jar works too)
+
+changes on a server (only after the user approved the plan)
+  push APP                     upload the new file and switch to it (start-script edit or the template's steps)
+  restart APP                  stop, start, wait until ready or failed
+  rollback APP                 undo the push: restore the start script, or run the template's rollback steps
+  write [--server ID] 'CMD'    run an approved one-off change (destructive commands are blocked)
+  config-pull APP [CFG]        download a config file for editing (checks it is clean on the server)
+  config-diff APP [CFG]        check the edited copy and show the diff
+  config-push APP [CFG] 'MSG'  upload the edited config; commit it (git) or back it up first (no git)
+  config-verify APP [CFG] [KEY]  check the serving URL returns the new value of each changed path
+  config-revert APP [CFG]      git revert the pushed commit, or restore the backup
+
+files (local)
+  yaml-find FILE KEY           where KEY sits: dotted path, lines, value preview
+  yaml-check FILE              syntax and duplicate-key check
+EOF
+}
+
+cmd=${1:-help}
+shift || true
+case "$cmd" in
+  templates) python3 "$TPL" templates ;;
+  use) python3 "$TPL" use "${1:-}" ;;
+  configure) exec python3 "$SKILL_DIR/scripts/uat-ui" "$@" ;;
+  console) exec python3 "$SKILL_DIR/scripts/uat-console" "$@" ;;
+  mode) python3 "$TPL" mode "$@" ;;
+  template-check) python3 "$TPL" check "$@" ;;
+  apps) python3 "$TPL" apps ;;
+  instructions) python3 "$TPL" instructions "$@" ;;
+  setup-status) python3 "$TPL" setup-status ;;
+  set) [ $# -eq 2 ] || die "usage: uat set KEY VALUE"; python3 "$TPL" local-set "$1" "$2" ;;
+  set-password) cmd_set_password "$@" ;;
+  show) python3 "$TPL" show ;;
+  ping) cmd_ping "$@" ;;
+  check-paths) cmd_check_paths ;;
+  detect) cmd_detect "$@" ;;
+  audit) cmd_audit "$@" ;;
+  read) cmd_read "$@" ;;
+  write) cmd_write "$@" ;;
+  get) cmd_get "$@" ;;
+  log) cmd_log "$@" ;;
+  current) cmd_current "$@" ;;
+  build) cmd_build "$@" ;;
+  rename|rename-jar) cmd_rename "$@" ;;
+  preflight) cmd_preflight "$@" ;;
+  push) cmd_push "$@" ;;
+  restart) cmd_restart "$@" ;;
+  rollback) cmd_rollback "$@" ;;
+  config-pull) cmd_config_pull "$@" ;;
+  config-diff) cmd_config_diff "$@" ;;
+  config-push) cmd_config_push "$@" ;;
+  config-verify) cmd_config_verify "$@" ;;
+  config-revert) cmd_config_revert "$@" ;;
+  yaml-find) [ $# -eq 2 ] || die "usage: uat yaml-find FILE KEY"; python3 "$LIB" yaml-find "$1" "$2" ;;
+  yaml-check) [ $# -eq 1 ] || die "usage: uat yaml-check FILE"; python3 "$LIB" yaml-check "$1" ;;
+  help|-h|--help) usage ;;
+  *) usage; exit 2 ;;
+esac

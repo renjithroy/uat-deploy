@@ -1,0 +1,3 @@
+#!/bin/sh
+# SSH_ASKPASS helper: answers ssh's password prompt from the saved password file.
+exec cat "${UAT_PASSWORD_FILE:?}"

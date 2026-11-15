@@ -1,0 +1,76 @@
+/* Live-demo chrome, added on top of the unchanged pages in ui/: a slim banner, room for it, and the what-to-try card. */
+:root { --demo-h: 32px; }
+/* the pages set html, body { height: 100% }, which ends the sticky header after one screen of scrolling; let body grow */
+body { padding-top: var(--demo-h); height: auto; min-height: 100%; }
+
+.demo-banner {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 60; height: var(--demo-h);
+  display: flex; align-items: center; justify-content: center; gap: 10px; padding: 0 16px;
+  background: var(--change-bg); color: var(--ink); border-bottom: 1px solid var(--rule);
+  font: 400 13px/1 var(--text); white-space: nowrap; overflow: hidden;
+}
+.demo-banner .demo-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--change); flex: none; }
+.demo-banner b { font-weight: 600; }
+.demo-banner .demo-msg { overflow: hidden; text-overflow: ellipsis; }
+.demo-banner button, .demo-banner a {
+  flex: none; font: 500 12.5px/1 var(--text); color: var(--ink); background: var(--sheet); border: 1px solid var(--rule-2);
+  border-radius: 999px; padding: 5px 11px; cursor: pointer; text-decoration: none;
+}
+.demo-banner button:hover, .demo-banner a:hover { border-color: var(--ink-3); }
+.demo-banner :focus-visible { outline: 2px solid var(--change); outline-offset: 2px; }
+@media (max-width: 700px) {
+  .demo-banner { justify-content: flex-start; gap: 8px; padding: 0 12px; }
+  .demo-banner .demo-long { display: none; }
+}
+
+/* room for the banner in the pages' own sticky and full-height layouts */
+.bar { top: var(--demo-h); }
+.drawer { top: var(--demo-h); }
+@media (min-width: 901px) {
+  .shell { min-height: calc(100vh - var(--bar-h) - var(--demo-h)); }
+  .side { top: calc(var(--bar-h) + var(--demo-h)); height: calc(100vh - var(--bar-h) - var(--demo-h)); }
+  .pane.askpane { height: calc(100vh - var(--bar-h) - var(--demo-h)); }
+}
+@media (min-width: 861px) {
+  .editor { height: calc(100vh - var(--bar-h) - var(--demo-h)); }
+  .newcard { top: calc(var(--bar-h) + 28px + var(--demo-h)); }
+}
+@media (max-width: 1180px) { .with-file .file { top: calc(var(--bar-h) + var(--demo-h)); } }
+@media (max-width: 1560px) { .in-console .with-file .file { top: calc(var(--bar-h) + var(--demo-h)); } }
+
+/* the what-to-try card */
+.demo-layer { position: fixed; inset: 0; z-index: 70; display: grid; place-items: center; padding: 16px; }
+.demo-scrim { position: absolute; inset: 0; background: rgba(13, 20, 23, .45); animation: demo-fade .18s; }
+.demo-card {
+  position: relative; width: min(600px, 100%); max-height: calc(100vh - 32px); overflow-y: auto;
+  background: var(--sheet); color: var(--ink); border: 1px solid var(--rule); border-radius: 14px; box-shadow: var(--shadow);
+  padding: 28px 28px 22px; font: 400 14px/1.55 var(--text); animation: demo-rise .22s ease-out;
+}
+.demo-card .demo-eyebrow { display: inline-flex; align-items: center; gap: 8px; margin: 0 0 10px; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--change); }
+.demo-card h2 { font: 600 24px/1.2 var(--display); letter-spacing: -.01em; margin: 0 0 10px; }
+.demo-card > p { margin: 0 0 16px; color: var(--ink-2); }
+.demo-try { list-style: none; margin: 0 0 18px; padding: 0; border-top: 1px solid var(--rule); }
+.demo-try li { border-bottom: 1px solid var(--rule); }
+.demo-try button {
+  width: 100%; display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 12px; align-items: start; text-align: left;
+  padding: 11px 6px; background: none; border: 0; color: inherit; font: inherit; cursor: pointer; border-radius: 8px;
+}
+.demo-try button:hover { background: var(--hover); }
+.demo-try button:focus-visible { outline: 2px solid var(--safe); outline-offset: -2px; }
+.demo-try b { display: block; font-weight: 600; }
+.demo-try small { display: block; color: var(--ink-3); font-size: 13px; line-height: 1.45; }
+.demo-n { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; background: var(--safe-bg); color: var(--safe); font: 600 13px/1 var(--display); }
+.demo-acts { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.demo-acts button { height: 40px; padding: 0 18px; border-radius: 8px; font: 600 14px/1 var(--text); cursor: pointer; }
+.demo-play { background: var(--ink); color: var(--paper); border: 1px solid var(--ink); }
+.demo-play:hover { opacity: .9; }
+.demo-skip { background: none; color: var(--ink); border: 1px solid var(--rule-2); }
+.demo-skip:hover { border-color: var(--ink-3); }
+.demo-acts button:focus-visible { outline: 2px solid var(--change); outline-offset: 2px; }
+.demo-tip { margin: 16px 0 0; font-size: 12.5px; color: var(--ink-3); }
+.demo-reset { background: none; border: 0; padding: 0; font: inherit; color: var(--ink-2); text-decoration: underline; cursor: pointer; }
+.demo-tip code { font-family: var(--mono); font-size: 12px; background: var(--well); padding: 1px 5px; border-radius: 4px; color: var(--ink-2); }
+@keyframes demo-fade { from { opacity: 0; } }
+@keyframes demo-rise { from { opacity: 0; transform: translateY(8px); } }
+@media (max-width: 600px) { .demo-card { padding: 22px 18px 18px; } .demo-card h2 { font-size: 20px; } }
+@media (prefers-reduced-motion: reduce) { .demo-scrim, .demo-card { animation: none; } }

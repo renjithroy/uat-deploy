@@ -1,0 +1,5 @@
+{
+  "buildCommand": "node demo/build.mjs",
+  "outputDirectory": "dist",
+  "rewrites": [{ "source": "/configure", "destination": "/configure/index.html" }]
+}

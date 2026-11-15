@@ -1,0 +1,1985 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>UAT templates</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M4 16h24' stroke='%230B7A68' stroke-width='4'/%3E%3Ccircle cx='7' cy='16' r='5' fill='%23fff' stroke='%23142028' stroke-width='3'/%3E%3Ccircle cx='25' cy='16' r='5' fill='%23B65F00'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Red+Hat+Display:wght@500;600;700&family=Red+Hat+Mono:wght@400;500&family=Red+Hat+Text:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<script>
+  (() => {
+    let t = null;
+    if (window.__console) { document.documentElement.classList.add("in-console"); t = (window.__prefs || {}).theme; }
+    else try { t = localStorage.getItem("uat-deploy:theme"); } catch {}
+    if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+  })();
+</script>
+<style>
+:root {
+  --bar-h: 58px;
+  --rail-w: 248px;
+  --file-w: clamp(340px, 33vw, 600px);
+  --r-s: 6px;
+  --r-m: 10px;
+  --display: "Red Hat Display", "Red Hat Text", system-ui, sans-serif;
+  --text: "Red Hat Text", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "Red Hat Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+/* Colour carries meaning: slate = on your machine, pine = reads UAT or fine, amber = changes UAT, red = a problem. */
+:root, :root[data-theme="light"] {
+  --paper: #EEF1F0; --sheet: #FFFFFF; --well: #E4E9E7; --hover: #F4F6F5; --ink: #142028; --ink-2: #3F4D57;
+  --ink-3: #64727C; --rule: #D5DCDA; --rule-2: #B3BEBB; --local: #4F6475; --safe: #0B7A68; --safe-bg: #E1F2EE;
+  --change: #B65F00; --change-bg: #FBEEDD; --bad: #B3261E; --bad-bg: #FBE9E7; --code-key: #134E6F; --code-str: #3C5A2E;
+  --code-com: #7A8781; --add-bg: #E3F3EC; --add: #2F8F5B; --mod: #C27C12; --shadow: 0 10px 30px rgba(20, 32, 40, .14);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #121213; --sheet: #1C1C1F; --well: #17171A; --hover: #242428; --ink: #ECECEE; --ink-2: #B6B6BC;
+    --ink-3: #8B8B93; --rule: #2B2B30; --rule-2: #404047; --local: #9AA7B4; --safe: #3CC0A7; --safe-bg: #16302A;
+    --change: #F2A04A; --change-bg: #33240F; --bad: #F2806F; --bad-bg: #3A1A16; --code-key: #8CC8E8;
+    --code-str: #B5D49A; --code-com: #7D7D85; --add-bg: #16302A; --add: #52C08A; --mod: #E0A24A;
+    --shadow: 0 12px 34px rgba(0, 0, 0, .5); color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #121213; --sheet: #1C1C1F; --well: #17171A; --hover: #242428; --ink: #ECECEE; --ink-2: #B6B6BC;
+  --ink-3: #8B8B93; --rule: #2B2B30; --rule-2: #404047; --local: #9AA7B4; --safe: #3CC0A7; --safe-bg: #16302A;
+  --change: #F2A04A; --change-bg: #33240F; --bad: #F2806F; --bad-bg: #3A1A16; --code-key: #8CC8E8;
+  --code-str: #B5D49A; --code-com: #7D7D85; --add-bg: #16302A; --add: #52C08A; --mod: #E0A24A;
+  --shadow: 0 12px 34px rgba(0, 0, 0, .5); color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 400 14px/1.5 var(--text); -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+button, input, select, textarea { font: inherit; color: inherit; }
+code, .mono { font-family: var(--mono); font-size: 13px; }
+code { overflow-wrap: anywhere; }
+a { color: inherit; }
+:focus-visible { outline: 2px solid var(--safe); outline-offset: 2px; }
+svg.i { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.spin { display: inline-block; width: 14px; height: 14px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------------------------------------------------------------- bar */
+.bar { position: sticky; top: 0; z-index: 20; height: var(--bar-h); display: flex; align-items: center; gap: 18px; padding: 0 18px; background: var(--sheet); border-bottom: 1px solid var(--rule); }
+.mark { display: flex; align-items: center; gap: 10px; text-decoration: none; font: 600 16px/1 var(--display); white-space: nowrap; }
+.mark svg { width: 30px; height: 18px; }
+.bar-mid { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 10px; }
+.bar-mid .tname { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bar-mid .file { font-family: var(--mono); font-size: 12.5px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.state { all: unset; display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink-3); white-space: nowrap; }
+.state::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--rule-2); }
+.state.dirty::before { background: var(--change); }
+.state.bad { color: var(--bad); cursor: pointer; }
+.state.bad::before { background: var(--bad); }
+.state.ok::before { background: var(--safe); }
+.bar-actions { display: flex; align-items: center; gap: 8px; }
+
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 34px; padding: 0 14px; border: 1px solid var(--rule-2); border-radius: var(--r-s); background: var(--sheet); cursor: pointer; font-weight: 500; white-space: nowrap; transition: background .12s, border-color .12s; }
+.btn:hover { background: var(--hover); border-color: var(--ink-3); }
+.btn:disabled { opacity: .55; cursor: not-allowed; }
+.btn.primary { background: var(--ink); border-color: var(--ink); color: var(--paper); }
+.btn.primary:hover { background: var(--ink-2); border-color: var(--ink-2); }
+.btn.quiet { border-color: transparent; background: transparent; color: var(--ink-2); }
+.btn.quiet:hover { background: var(--well); }
+.btn.small { height: 28px; padding: 0 10px; font-size: 13px; }
+.btn.danger:hover { color: var(--bad); border-color: var(--bad); }
+.btn.icon { width: 34px; padding: 0; }
+.btn.on { background: var(--well); }
+
+/* ---------------------------------------------------------------- home */
+.home { max-width: 1180px; margin: 0 auto; padding: 48px 28px 80px; display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(320px, 1fr); gap: 56px; }
+.home h1 { font: 600 34px/1.12 var(--display); letter-spacing: -.015em; margin: 0 0 12px; }
+.lede { margin: 0 0 32px; color: var(--ink-2); font-size: 15.5px; max-width: 60ch; }
+.tpl-list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--rule); }
+.tpl { border-bottom: 1px solid var(--rule); }
+.tpl button { all: unset; box-sizing: border-box; display: grid; grid-template-columns: 1fr auto; gap: 4px 18px; width: 100%; padding: 20px 6px; cursor: pointer; }
+.tpl button:hover { background: var(--hover); }
+.tpl button:focus-visible { outline: 2px solid var(--safe); outline-offset: -2px; }
+.tpl .t-name { font: 600 19px/1.25 var(--display); }
+.tpl .t-id { font-family: var(--mono); font-size: 12.5px; color: var(--ink-3); align-self: center; }
+.tpl .t-desc { grid-column: 1 / -1; color: var(--ink-2); max-width: 70ch; }
+.tpl .t-meta { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; font-size: 13px; color: var(--ink-3); }
+.t-apps { display: flex; flex-wrap: wrap; gap: 6px; }
+.pill { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: 999px; background: var(--well); color: var(--ink-2); font-size: 12.5px; white-space: nowrap; }
+.pill.bad { background: var(--bad-bg); color: var(--bad); }
+.empty { padding: 28px 0; color: var(--ink-3); }
+.newcard { align-self: start; position: sticky; top: calc(var(--bar-h) + 28px); background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--r-m); padding: 26px; }
+.newcard h2 { font: 600 21px/1.2 var(--display); margin: 0 0 6px; }
+.newcard > p { margin: 0 0 20px; color: var(--ink-2); }
+
+/* radio cards, used for "start from" and for choices in the forms */
+.choices { display: grid; gap: 8px; }
+.choice { display: grid; grid-template-columns: 20px 1fr; gap: 2px 10px; padding: 12px 14px; border: 1px solid var(--rule); border-radius: var(--r-s); cursor: pointer; background: var(--sheet); }
+.choice:hover { border-color: var(--rule-2); background: var(--hover); }
+.choice input { margin: 3px 0 0; accent-color: var(--safe); }
+.choice b { font-weight: 600; }
+.choice .d { display: block; color: var(--ink-3); font-size: 13px; margin-top: 2px; }
+.choice:has(input:checked) { border-color: var(--safe); background: var(--safe-bg); }
+.choice:has(input:checked) .d { color: var(--ink-2); }
+
+/* ---------------------------------------------------------------- editor frame */
+.editor { display: grid; grid-template-columns: var(--rail-w) minmax(0, 1fr); height: calc(100vh - var(--bar-h)); }
+.editor.with-file { grid-template-columns: var(--rail-w) minmax(0, 1fr) var(--file-w); }
+.rail { border-right: 1px solid var(--rule); background: var(--sheet); overflow-y: auto; padding: 18px 10px 24px; display: flex; flex-direction: column; gap: 2px; }
+.rail-head { padding: 2px 10px 16px; }
+.rail-title { font: 600 18px/1.2 var(--display); word-break: break-word; }
+.rail-sub { font-family: var(--mono); font-size: 12px; color: var(--ink-3); margin-top: 4px; }
+.group { display: flex; align-items: center; justify-content: space-between; padding: 14px 10px 4px; color: var(--ink-3); font-size: 12.5px; font-weight: 600; }
+.group button { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px; border-radius: 4px; color: var(--ink-2); font-weight: 500; }
+.group button:hover { background: var(--well); color: var(--ink); }
+.group button:focus-visible { outline: 2px solid var(--safe); }
+.nav { all: unset; box-sizing: border-box; display: grid; grid-template-columns: 10px 1fr auto; align-items: center; gap: 0 10px; padding: 7px 10px; border-radius: var(--r-s); cursor: pointer; color: var(--ink-2); }
+.nav:hover { background: var(--hover); color: var(--ink); }
+.nav:focus-visible { outline: 2px solid var(--safe); outline-offset: -2px; }
+.nav.on { background: var(--well); color: var(--ink); font-weight: 600; box-shadow: inset 3px 0 0 var(--ink); }
+.nav .lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav small { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); font-weight: 400; }
+.nav .sub2 { grid-column: 2 / -1; font-size: 12px; color: var(--ink-3); font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sdot { width: 8px; height: 8px; border-radius: 50%; }
+.sdot.error { background: var(--bad); }
+.sdot.warn { background: var(--change); }
+.rail-foot { margin-top: auto; padding: 18px 10px 0; font-size: 12.5px; color: var(--ink-3); }
+
+.pane { overflow-y: auto; }
+.pane-in { max-width: 840px; margin: 0 auto; padding: 30px 36px 120px; }
+.pane-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 8px; }
+.pane-head h2 { font: 600 28px/1.15 var(--display); letter-spacing: -.01em; margin: 0; word-break: break-word; }
+.pane-head .sub { margin: 6px 0 0; color: var(--ink-3); font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
+.tools { display: flex; gap: 4px; flex: none; align-items: center; }
+
+.sec { padding: 24px 0 6px; border-top: 1px solid var(--rule); margin-top: 24px; }
+.sec:first-of-type { margin-top: 18px; }
+.sec h3 { font: 600 17px/1.3 var(--display); margin: 0; }
+.about { margin: 2px 0 16px; color: var(--ink-3); max-width: 68ch; }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px 18px; }
+.field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.field.wide { grid-column: 1 / -1; }
+.field > label, .lab { font-size: 13px; font-weight: 500; color: var(--ink-2); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.field input, .field select, .field textarea, .inp { width: 100%; min-height: 36px; padding: 7px 10px; border: 1px solid var(--rule-2); border-radius: var(--r-s); background: var(--sheet); transition: border-color .12s, box-shadow .12s; }
+.field input[type="radio"], .field input[type="checkbox"] { width: auto; min-height: 0; padding: 0; border: 0; box-shadow: none; flex: none; }
+.field textarea { resize: vertical; line-height: 1.5; }
+.field input:hover, .field select:hover, .field textarea:hover { border-color: var(--ink-3); }
+.field input:focus, .field select:focus, .field textarea:focus, .inp:focus { outline: none; border-color: var(--safe); box-shadow: 0 0 0 3px color-mix(in srgb, var(--safe) 22%, transparent); }
+.field input[readonly] { background: var(--well); color: var(--ink-2); }
+.hint { margin: 0; font-size: 12.5px; color: var(--ink-3); }
+.hint code { font-size: 12px; background: var(--well); padding: 0 4px; border-radius: 3px; }
+.msg { margin: 0; font-size: 12.5px; display: none; }
+.field.has-error input, .field.has-error textarea, .field.has-error select, .has-error > .inp { border-color: var(--bad); }
+.field.has-error .msg, .has-error > .msg { display: block; color: var(--bad); }
+.field.has-warn .msg, .has-warn > .msg { display: block; color: var(--change); }
+.field.pulse input, .field.pulse textarea, .field.pulse select { animation: pulse 1.2s ease-out; }
+@keyframes pulse { 0% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--safe) 35%, transparent); } 100% { box-shadow: 0 0 0 0 transparent; } }
+.tag { font-size: 11.5px; font-weight: 600; padding: 1px 7px; border-radius: 999px; white-space: nowrap; }
+.tag.good { background: var(--safe-bg); color: var(--safe); }
+.tag.meh { background: var(--change-bg); color: var(--change); }
+.tag.found { background: var(--safe-bg); color: var(--safe); font-weight: 500; }
+
+/* fields saved only on this machine */
+.here { padding: 14px 16px 16px; border-radius: var(--r-m); background: var(--well); border: 1px dashed var(--rule-2); }
+.here-h { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 13px; color: var(--ink-2); }
+.here-h b { font-weight: 600; color: var(--ink); }
+.here .field input, .here .field select { background: var(--sheet); }
+
+.seg { display: inline-flex; flex-wrap: wrap; padding: 3px; gap: 3px; border-radius: 8px; background: var(--well); }
+.seg button { all: unset; cursor: pointer; padding: 7px 14px; border-radius: 6px; color: var(--ink-2); font-weight: 500; display: inline-flex; align-items: center; gap: 8px; }
+.seg button:hover { color: var(--ink); }
+.seg button:focus-visible { outline: 2px solid var(--safe); }
+.seg button.on { background: var(--sheet); color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px rgba(20, 32, 40, .12); }
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--rule-2); background: var(--sheet); font-size: 13px; color: var(--ink-2); }
+.chip:hover { border-color: var(--ink-3); color: var(--ink); }
+.chip:focus-visible { outline: 2px solid var(--safe); }
+.chip.on { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.chip .hint { font-size: 12px; }
+.chip.on .hint { color: var(--paper); opacity: .72; }
+.chip b { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: var(--paper); color: var(--ink); font-size: 11px; font-weight: 700; }
+.chip.ph { font-family: var(--mono); font-size: 12.5px; height: 24px; }
+
+details.more { margin-top: 16px; }
+details.more > summary { cursor: pointer; list-style: none; display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); font-size: 13px; font-weight: 500; padding: 4px 0; }
+details.more > summary::-webkit-details-marker { display: none; }
+details.more > summary::before { content: ""; width: 6px; height: 6px; border-right: 1.8px solid currentColor; border-bottom: 1.8px solid currentColor; transform: rotate(-45deg); transition: transform .15s; margin-right: 2px; }
+details.more[open] > summary::before { transform: rotate(45deg); }
+details.more > summary:hover { color: var(--ink); }
+.more-b { margin-top: 12px; padding-top: 14px; border-top: 1px dashed var(--rule); }
+.note { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border-radius: var(--r-s); background: var(--well); color: var(--ink-2); margin-bottom: 18px; }
+.note.ok { background: var(--safe-bg); color: var(--ink); }
+.note.ok svg { color: var(--safe); margin-top: 2px; }
+.note.warn { background: var(--change-bg); color: var(--ink); }
+.note .btn { margin-left: auto; }
+
+/* problems for the page shown */
+.pbanner { margin: 16px 0 4px; padding: 12px 16px; border-radius: var(--r-m); background: var(--bad-bg); color: var(--ink); }
+.pbanner b { color: var(--bad); font-weight: 600; }
+.pbanner ul { margin: 6px 0 0; padding: 0; list-style: none; display: grid; gap: 2px; }
+.pbanner button { all: unset; cursor: pointer; font-size: 13px; text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--bad) 50%, transparent); text-underline-offset: 3px; }
+.pbanner button:hover { color: var(--bad); }
+.pbanner button:focus-visible { outline: 2px solid var(--safe); }
+
+/* ---------------------------------------------------------------- summary rows of an app */
+.srow { border: 1px solid var(--rule); border-radius: var(--r-m); background: var(--sheet); margin-top: 10px; scroll-margin-top: 16px; }
+.srow-h { all: unset; box-sizing: border-box; width: 100%; display: grid; grid-template-columns: 150px minmax(0, 1fr) auto auto; gap: 14px; align-items: center; padding: 14px 18px; cursor: pointer; border-radius: var(--r-m); }
+.srow-h:hover { background: var(--hover); }
+.srow-h:focus-visible { outline: 2px solid var(--safe); outline-offset: -2px; }
+.srow-t { font-weight: 600; }
+.srow-s { color: var(--ink-2); font-size: 13.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srow-s code { font-size: 12.5px; }
+.srow-s .todo { color: var(--ink-3); font-style: italic; }
+.srow-e { color: var(--ink-3); font-size: 13px; display: inline-flex; align-items: center; gap: 4px; }
+.srow.open { box-shadow: var(--shadow); border-color: var(--rule-2); }
+.srow.open .srow-h { border-bottom: 1px solid var(--rule); border-radius: var(--r-m) var(--r-m) 0 0; }
+.srow-b { padding: 18px 18px 20px; }
+.srow.is-error { border-color: color-mix(in srgb, var(--bad) 55%, var(--rule)); }
+.srow.is-error .srow-t { color: var(--bad); }
+.srow.flash { animation: flash 1.2s ease-out; }
+@keyframes flash { 0% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--safe) 40%, transparent); } 100% { box-shadow: none; } }
+
+/* ---------------------------------------------------------------- the route: what a deploy of this app does */
+.route-wrap { margin: 18px 0 18px; padding: 8px 20px 14px; background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--r-m); }
+.route { list-style: none; margin: 0; padding: 28px 0 6px; display: flex; overflow-x: auto; scrollbar-width: thin; }
+.st { --z: var(--local); position: relative; flex: 1 1 0; min-width: 76px; }
+.st.z-change { --z: var(--change); }
+.st.z-read { --z: var(--safe); }
+.st::before { content: ""; position: absolute; top: 10px; left: 0; right: 0; height: 4px; background: var(--z); }
+.st:first-child::before { left: 11px; }
+.st:last-child::before { right: calc(100% - 11px); }
+.st button { all: unset; box-sizing: border-box; display: flex; flex-direction: column; gap: 3px; width: 100%; padding: 0 10px 4px 0; cursor: pointer; }
+.st button:focus-visible .dot { outline: 2px solid var(--ink); outline-offset: 3px; }
+.dot { position: relative; z-index: 1; width: 24px; height: 24px; border-radius: 50%; border: 4px solid var(--z); background: var(--sheet); transition: transform .15s; }
+.st.z-local .dot, .st.z-change .dot { background: var(--z); }
+.st button:hover .dot { transform: scale(1.12); }
+.st.is-error .dot { border-style: dashed; border-color: var(--bad); background: var(--bad-bg); }
+.st-l { margin-top: 8px; font-weight: 600; font-size: 13.5px; line-height: 1.2; }
+.st-d { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.st.is-error .st-d { color: var(--bad); font-family: var(--text); font-size: 12px; }
+.hop { flex: 0 0 22px; position: relative; }
+.hop::before { content: ""; position: absolute; top: -2px; height: 30px; left: 10px; border-left: 2px dashed var(--ink-3); }
+.hop span { position: absolute; left: 0; top: -24px; font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); white-space: nowrap; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--rule); font-size: 12.5px; color: var(--ink-3); }
+.legend i { display: inline-block; width: 18px; height: 4px; border-radius: 2px; vertical-align: middle; margin-right: 7px; }
+
+/* ---------------------------------------------------------------- steps, config cards, detect */
+.rows { display: grid; gap: 8px; }
+.row { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+.row .n { font: 600 12px/1 var(--mono); color: var(--ink-3); text-align: right; }
+.row .msg { grid-column: 2 / -1; }
+.row .acts { display: flex; gap: 2px; }
+.mini { all: unset; cursor: pointer; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 5px; color: var(--ink-3); }
+.mini:hover { background: var(--well); color: var(--ink); }
+.mini:focus-visible { outline: 2px solid var(--safe); }
+.mini.del:hover { color: var(--bad); }
+.mini:disabled { opacity: .35; cursor: default; }
+.addline { margin-top: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.cfg { padding: 16px 18px; border: 1px solid var(--rule); border-radius: var(--r-m); background: var(--paper); }
+.cfg + .cfg { margin-top: 12px; }
+.cfg-h { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.cfg-h b { font-family: var(--mono); font-size: 13.5px; overflow-wrap: anywhere; }
+.chain { list-style: none; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 14px 0 0; padding: 10px 0 0; border-top: 1px solid var(--rule); font-size: 12.5px; color: var(--ink-3); }
+.chain li { display: inline-flex; align-items: center; gap: 4px; }
+.chain li + li::before { content: ""; width: 14px; height: 2px; background: var(--rule-2); margin-right: 4px; }
+.chain li.c { color: var(--change); font-weight: 500; }
+.chain li.r { color: var(--safe); font-weight: 500; }
+.inline-radios { display: flex; flex-wrap: wrap; gap: 6px 18px; }
+.inline-radios label { display: inline-flex; gap: 8px; align-items: center; cursor: pointer; }
+.inline-radios input { accent-color: var(--safe); }
+.jarpreview { margin-top: 10px; padding: 10px 12px; border-radius: var(--r-s); background: var(--well); font-family: var(--mono); font-size: 12.5px; line-height: 1.6; overflow-x: auto; white-space: pre; }
+.jarpreview .old { color: var(--ink-3); }
+.jarpreview .new { color: var(--add); }
+.detect { margin-top: 16px; border: 1px solid var(--rule); border-radius: var(--r-m); background: var(--sheet); overflow: hidden; }
+.detect-h { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 16px; background: var(--well); border-bottom: 1px solid var(--rule); }
+.detect-h b { font-weight: 600; }
+.sug { display: grid; grid-template-columns: 130px minmax(0, 1fr) auto; gap: 4px 14px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--rule); }
+.sug:last-child { border-bottom: 0; }
+.sug .k { color: var(--ink-3); font-size: 13px; }
+.sug .v { font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
+.sug .why { grid-column: 2; color: var(--ink-3); font-size: 12.5px; }
+.sug.used .v { color: var(--safe); }
+.signin-state { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 13px; }
+.signin-state.ok { color: var(--safe); }
+.signin-state.no { color: var(--change); }
+.signin-state.bad { color: var(--bad); }
+.map { display: grid; gap: 14px; }
+.lane { border: 1px solid var(--rule); border-radius: var(--r-m); background: var(--sheet); }
+.lane-h { display: flex; justify-content: space-between; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--rule); }
+.lane-h b { font-weight: 600; }
+.lane-h span { font-family: var(--mono); font-size: 12.5px; color: var(--ink-3); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; padding: 14px; }
+.tile { all: unset; box-sizing: border-box; cursor: pointer; padding: 12px 14px; border-radius: var(--r-s); border: 1px solid var(--rule); display: grid; gap: 3px; }
+.tile:hover { border-color: var(--rule-2); background: var(--hover); }
+.tile:focus-visible { outline: 2px solid var(--safe); }
+.tile b { font-weight: 600; }
+.tile span { font-size: 12.5px; color: var(--ink-3); }
+.tile.add { place-items: center; color: var(--ink-2); border-style: dashed; }
+
+/* ---------------------------------------------------------------- the guided setup */
+.wiz { max-width: 700px; margin: 0 auto; }
+.wiz-top { display: flex; align-items: center; gap: 16px; margin-bottom: 30px; }
+.wiz-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 13px; color: var(--ink-3); }
+.wiz-steps li { display: inline-flex; align-items: center; gap: 7px; }
+.wiz-steps li span { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; border: 1.5px solid var(--rule-2); font: 600 11.5px/1 var(--text); }
+.wiz-steps li.done span { background: var(--safe); border-color: var(--safe); color: var(--sheet); }
+.wiz-steps li.now { color: var(--ink); font-weight: 600; }
+.wiz-steps li.now span { border-color: var(--ink); background: var(--ink); color: var(--paper); }
+.wiz-q { font: 600 30px/1.15 var(--display); letter-spacing: -.012em; margin: 0 0 8px; }
+.wiz-help { margin: 0 0 26px; color: var(--ink-2); font-size: 15px; max-width: 62ch; }
+.wiz-body .grid { grid-template-columns: 1fr; gap: 18px; }
+.wiz-body .grid.two { grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+.wiz-nav { display: flex; align-items: center; gap: 8px; margin-top: 30px; padding-top: 20px; border-top: 1px solid var(--rule); }
+.wiz-nav .spacer { flex: 1; }
+.wiz-nav .btn { height: 38px; padding: 0 18px; }
+.sub-q { font: 600 15px/1.3 var(--text); margin: 26px 0 10px; }
+.sub-q:first-child { margin-top: 0; }
+
+/* ---------------------------------------------------------------- the file */
+.file { border-left: 1px solid var(--rule); background: var(--sheet); display: flex; flex-direction: column; min-width: 0; }
+.file-h { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--rule); }
+.file-h .fname { font-family: var(--mono); font-size: 12.5px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diffstat { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+.diffstat .a { color: var(--add); }
+.diffstat .d { color: var(--bad); }
+.code { flex: 1; overflow: auto; margin: 0; padding: 10px 0 40px; font: 400 12.5px/1.65 var(--mono); counter-reset: ln; tab-size: 2; }
+.ln { display: grid; grid-template-columns: 44px 1fr; white-space: pre; min-width: max-content; padding-right: 16px; }
+.ln::before { counter-increment: ln; content: counter(ln); text-align: right; padding-right: 12px; color: var(--ink-3); opacity: .7; user-select: none; border-right: 3px solid transparent; margin-right: 12px; }
+.ln.add { background: var(--add-bg); }
+.ln.add::before { border-right-color: var(--add); }
+.ln.mod::before { border-right-color: var(--mod); }
+.ln.mod { background: color-mix(in srgb, var(--mod) 10%, transparent); }
+.ln.delb { box-shadow: inset 0 2px 0 var(--bad); }
+.ln span.k { color: var(--code-key); }
+.ln span.s { color: var(--code-str); }
+.ln span.c { color: var(--code-com); font-style: italic; }
+.ln span.p { color: var(--ink-3); }
+
+/* ---------------------------------------------------------------- drawer, toast, closed */
+.scrim { position: fixed; inset: 0; background: rgba(13, 20, 23, .35); z-index: 40; animation: fade .15s; }
+@keyframes fade { from { opacity: 0; } }
+.drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(560px, 100vw); background: var(--sheet); z-index: 41; box-shadow: var(--shadow); display: flex; flex-direction: column; animation: slide .2s ease-out; }
+@keyframes slide { from { transform: translateX(24px); opacity: 0; } }
+.drawer-h { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 18px 22px; border-bottom: 1px solid var(--rule); }
+.drawer-h h3 { font: 600 19px/1.2 var(--display); margin: 0; }
+.drawer-b { flex: 1; overflow-y: auto; padding: 8px 22px 30px; }
+.cgroup h4 { margin: 18px 0 8px; font-weight: 600; font-size: 14px; }
+.cgroup h4 span { font-family: var(--mono); font-weight: 400; font-size: 12.5px; color: var(--ink-3); margin-left: 8px; }
+.citem { display: grid; grid-template-columns: 46px 70px 1fr; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--rule); font-size: 13px; align-items: baseline; }
+.citem .s { font: 600 11.5px/1 var(--mono); }
+.citem .s.PASS { color: var(--safe); }
+.citem .s.FAIL { color: var(--bad); }
+.citem .s.WARN, .citem .s.INFO { color: var(--change); }
+.citem .a { font-family: var(--mono); font-size: 12px; color: var(--ink-3); }
+.citem .t { font-family: var(--mono); font-size: 12px; word-break: break-all; }
+.verdict { margin: 16px 0 4px; padding: 12px 14px; border-radius: var(--r-s); font-weight: 500; }
+.verdict.ok { background: var(--safe-bg); color: var(--safe); }
+.verdict.bad { background: var(--bad-bg); color: var(--bad); }
+.toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 50; display: flex; align-items: center; gap: 10px; padding: 11px 16px; border-radius: 8px; background: var(--ink); color: var(--paper); box-shadow: var(--shadow); font-weight: 500; animation: rise .2s ease-out; max-width: calc(100vw - 32px); }
+.toast.bad { background: var(--bad); color: #fff; }
+@keyframes rise { from { transform: translate(-50%, 10px); opacity: 0; } }
+.closed { max-width: 620px; margin: 14vh auto 0; padding: 0 24px; }
+.closed h1 { font: 600 32px/1.15 var(--display); margin: 0 0 12px; }
+.closed p { color: var(--ink-2); font-size: 15.5px; }
+.closed code { background: var(--well); padding: 1px 5px; border-radius: 4px; }
+.loading { padding: 80px; text-align: center; color: var(--ink-3); }
+
+@media (max-width: 1180px) {
+  .editor.with-file { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
+  .with-file .file { position: fixed; top: var(--bar-h); right: 0; bottom: 0; width: min(560px, 100vw); z-index: 30; box-shadow: var(--shadow); }
+}
+@media (max-width: 860px) {
+  .home { grid-template-columns: 1fr; gap: 36px; padding: 28px 16px 60px; }
+  .newcard { position: static; }
+  .editor, .editor.with-file { grid-template-columns: minmax(0, 1fr); height: auto; }
+  .rail { border-right: 0; border-bottom: 1px solid var(--rule); flex-direction: row; flex-wrap: wrap; padding: 10px; gap: 4px; }
+  .rail-head, .rail-foot { display: none; }
+  .group { width: 100%; padding: 8px 6px 2px; }
+  .nav { grid-template-columns: 8px auto; }
+  .nav .sub2, .nav small { display: none; }
+  .pane { overflow: visible; }
+  .pane-in { padding: 22px 16px 80px; }
+  .pane-head { flex-direction: column; }
+  .tools { flex-wrap: wrap; }
+  .bar { gap: 10px; padding: 0 12px; }
+  .bar-mid .file, .mark span { display: none; }
+  .bar-actions .btn:not(.primary) { display: none; }
+  .srow-h { grid-template-columns: minmax(0, 1fr) auto; }
+  .srow-s { grid-column: 1 / -1; grid-row: 2; white-space: normal; }
+  .sug { grid-template-columns: 1fr auto; }
+  .sug .why { grid-column: 1; }
+  .wiz-q { font-size: 24px; }
+}
+
+/* ---------------------------------------------------------------- inside the console: its sidebar and its page style */
+.in-console { --rail-w: 224px; }
+.shell { display: grid; grid-template-columns: 292px minmax(0, 1fr); min-height: calc(100vh - var(--bar-h)); }
+.side { position: sticky; top: var(--bar-h); align-self: start; height: calc(100vh - var(--bar-h)); overflow-y: auto; border-right: 1px solid var(--rule); background: var(--sheet); padding: 16px 12px; display: flex; flex-direction: column; gap: 2px; }
+.csec { box-sizing: border-box; display: grid; grid-template-columns: 22px minmax(0, 1fr); align-items: center; gap: 0 12px; width: 100%; padding: 10px 12px; border-radius: var(--r-s); cursor: pointer; color: var(--ink-2); text-decoration: none; }
+.csec:hover { background: var(--hover); color: var(--ink); }
+.csec:focus-visible { outline: 2px solid var(--safe); outline-offset: -2px; }
+.csec.on { background: var(--ink); color: var(--paper); }
+.csec svg { width: 20px; height: 20px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.csec b { font: 600 15px/1.25 var(--text); }
+.csec small { grid-column: 2 / -1; font-size: 12.5px; color: var(--ink-3); }
+.csec.on small { color: color-mix(in srgb, var(--paper) 72%, transparent); }
+.side-foot { margin-top: auto; padding: 16px 12px 4px; border-top: 1px solid var(--rule); }
+.srv b { display: block; font: 600 14px/1.3 var(--display); }
+.srv code { display: block; font-size: 12px; color: var(--ink-3); }
+.srv p { margin: 6px 0 0; font-size: 12.5px; color: var(--ink-3); display: flex; gap: 7px; align-items: baseline; }
+.srv p::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--rule-2); transform: translateY(-1px); }
+.srv p.ok::before { background: var(--safe); }
+.srv p.bad { color: var(--bad); }
+.srv p.bad::before { background: var(--bad); }
+.in-console .mark { font-size: 16px; }
+.in-console .bar-mid { align-items: center; gap: 14px; }
+.btn.back { text-decoration: none; color: var(--ink-2); padding: 0 12px 0 8px; gap: 4px; flex: none; }
+.btn.back:hover { color: var(--ink); }
+.in-console .rail { background: var(--paper); }
+.in-console .home { display: block; max-width: 760px; margin: 0 auto; padding: 34px 40px 100px; }
+.in-console .home > section { display: none; }
+.in-console .newcard { position: static; border: 0; background: none; padding: 0; }
+.in-console .newcard h2 { font: 600 32px/1.12 var(--display); letter-spacing: -.015em; margin: 0 0 8px; }
+.in-console .newcard > p { color: var(--ink-2); max-width: 70ch; margin-bottom: 26px; }
+.in-console .newcard .btn.primary { width: auto !important; padding: 0 22px; }
+.in-console .pane-in { padding-top: 34px; }
+@media (max-width: 1560px) {
+  .in-console .editor.with-file { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
+  .in-console .with-file .file { position: fixed; top: var(--bar-h); right: 0; bottom: 0; width: min(560px, 100vw); z-index: 30; box-shadow: var(--shadow); }
+}
+@media (max-width: 900px) {
+  .shell { grid-template-columns: minmax(0, 1fr); }
+  .side { position: static; height: auto; flex-direction: row; border-right: 0; border-bottom: 1px solid var(--rule); padding: 8px; overflow-x: auto; }
+  .csec { width: auto; flex: none; padding: 8px 12px; }
+  .csec small, .side-foot { display: none; }
+  .in-console .home { padding: 22px 16px 60px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
+</style>
+</head>
+<body>
+<header class="bar">
+  <a class="mark" href="#home" data-home>
+    <svg viewBox="0 0 30 18" aria-hidden="true"><path d="M3 9h24" stroke="var(--safe)" stroke-width="3.5"/><circle cx="5" cy="9" r="4" fill="var(--sheet)" stroke="var(--ink)" stroke-width="2.5"/><circle cx="25" cy="9" r="4.5" fill="var(--change)"/></svg>
+    <span>UAT templates</span>
+  </a>
+  <div class="bar-mid" id="bar-mid"></div>
+  <div class="bar-actions" id="bar-actions"></div>
+  <button class="btn quiet icon" id="theme" type="button" title="Switch light or dark" aria-label="Switch light or dark">
+    <svg class="i" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z"/></svg>
+  </button>
+</header>
+<div id="view"><div class="loading">Loading templates…</div></div>
+<div id="layer"></div>
+
+<script>
+"use strict";
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const TOKEN = new URLSearchParams(location.search).get("token") || "";
+const slug = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32);
+const clone = (o) => JSON.parse(JSON.stringify(o ?? null));
+const ICON = {
+  plus: '<svg class="i" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>',
+  trash: '<svg class="i" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>',
+  up: '<svg class="i" viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg>',
+  down: '<svg class="i" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>',
+  copy: '<svg class="i" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a1 1 0 0 1 1-1h10"/></svg>',
+  dup: '<svg class="i" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg>',
+  laptop: '<svg class="i" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M2 19h20"/></svg>',
+  scan: '<svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/></svg>',
+  check: '<svg class="i" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7"/></svg>',
+  x: '<svg class="i" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+  file: '<svg class="i" viewBox="0 0 24 24"><path d="M14 3H6v18h12V7z"/><path d="M14 3v4h4"/></svg>',
+  key: '<svg class="i" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3"/></svg>',
+  pen: '<svg class="i" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/></svg>',
+};
+
+/* ------------------------------------------------------------------ server */
+// served by the console (UI mode), the configurator lives under /configure and Done leads back to the console
+const IN_CONSOLE = !!window.__console;
+async function api(path, body) {
+  const url = `${IN_CONSOLE ? "/configure" : ""}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(TOKEN)}`;
+  const opts = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  let res;
+  try { res = await fetch(url, opts); } catch { throw new Error("The configurator server stopped. Run uat configure again."); }
+  const data = await res.json().catch(() => ({ error: `The server answered ${res.status}.` }));
+  if (!res.ok) { const e = new Error(data.error || `The server answered ${res.status}.`); e.data = data; throw e; }
+  return data;
+}
+
+/* ------------------------------------------------------------------ state */
+const S = {
+  boot: null, draft: null, isNew: false, originalId: null, baseline: "", yaml: "", errors: [], warnings: [],
+  issues: new Map(), auth: {}, local: { repos: {}, builds: {}, config_dir: "" }, sel: { kind: "overview", i: 0 },
+  dirty: false, detect: {}, signin: {}, keyMode: {}, lastStep: null, saving: false, previewSeq: 0,
+  wizard: null, open: {}, more: {}, showFile: false,
+};
+
+const parsePath = (p) => String(p).split(".").map((x) => (/^\d+$/.test(x) ? Number(x) : x));
+function getAt(obj, path) { return parsePath(path).reduce((o, k) => (o == null ? undefined : o[k]), obj); }
+function setAt(obj, path, val) {
+  const ks = parsePath(path);
+  let o = obj;
+  ks.slice(0, -1).forEach((k, n) => {
+    if (o[k] == null || typeof o[k] !== "object") o[k] = typeof ks[n + 1] === "number" ? [] : {};
+    o = o[k];
+  });
+  o[ks[ks.length - 1]] = val;
+}
+
+function newApp(server) {
+  return { id: "", name: "", server: server || "", dir: "", port: "", process: "", log: "", start: "", stop: "",
+           ready: {}, build: {}, deploy: { style: "jar-start-script", edit: "duplicate" }, configs: [], instructions: "" };
+}
+function blankTemplate(id, name) {
+  return { schema: 1, id, name, description: "", servers: [{ id: "uat", label: "", host: "", user: "", aliases: [], notes: "" }],
+           defaults: { start_timeout: "", stop_timeout: "", ready: {} }, apps: [newApp("uat")], instructions: "" };
+}
+function fromFile(t) {
+  const d = clone(t || {});
+  d.servers = Object.entries((t && t.servers) || {}).map(([id, s]) => ({ id, label: "", host: "", user: "", aliases: [], notes: "", ...s }));
+  d.defaults = { ready: {}, ...(d.defaults || {}) };
+  d.defaults.ready = d.defaults.ready || {};
+  d.apps = (d.apps || []).map((a) => ({ ...newApp(a.server), ...a, ready: a.ready || {}, build: a.build || {},
+    deploy: a.deploy || { style: "none" }, configs: (a.configs || []).map((c) => ({ restart: [], ...c })) }));
+  d.schema = d.schema || 1;
+  return d;
+}
+const DEPLOY_KEYS = { "none": ["style"], "jar-start-script": ["style", "start_script", "edit", "name_prefix"],
+                      "custom": ["style", "name_prefix", "upload_dir", "steps", "rollback"] };
+const stripUi = (o) => Object.fromEntries(Object.entries(o).filter(([k]) => !k.startsWith("_")));
+function toFile(d) {
+  const t = clone(d);
+  t.servers = {};
+  for (const s of d.servers) { const { id, ...rest } = s; t.servers[id] = rest; }
+  t.apps = t.apps.map((a) => {
+    const style = a.deploy?.style || "none";
+    const dep = {};
+    for (const k of DEPLOY_KEYS[style] || ["style"]) if (a.deploy?.[k] !== undefined) dep[k] = a.deploy[k];
+    const out = { ...stripUi(a), deploy: dep, configs: (a.configs || []).map(stripUi) };
+    if (style === "none") delete out.build;
+    return out;
+  });
+  return t;
+}
+
+/* ------------------------------------------------------------------ issues */
+function issueKey(path) {
+  const p = [...path];
+  if (p[0] === "servers" && typeof p[1] === "string") {
+    const i = S.draft.servers.findIndex((s) => s.id === p[1]);
+    p[1] = i < 0 ? 0 : i;
+  }
+  return p.join(".");
+}
+function indexIssues() {
+  S.issues = new Map();
+  for (const [kind, list] of [["error", S.errors], ["warn", S.warnings]]) {
+    for (const it of list) {
+      const k = issueKey(it.path);
+      if (!S.issues.has(k)) S.issues.set(k, []);
+      S.issues.get(k).push({ ...it, kind });
+    }
+  }
+}
+const under = (k, p) => k === p || k.startsWith(p + ".");
+function worstAny(prefixes) {
+  let worst = null;
+  for (const [k, list] of S.issues) {
+    if (prefixes.some((p) => under(k, p))) for (const it of list) { if (it.kind === "error") return "error"; worst = "warn"; }
+  }
+  return worst;
+}
+const errorsUnder = (prefixes) => S.errors.filter((e) => prefixes.some((p) => under(issueKey(e.path), p)));
+function clientIssues() {
+  const extra = [];
+  const seen = new Map();
+  S.draft.servers.forEach((s, i) => {
+    if (seen.has(s.id)) extra.push({ path: ["servers", i, "id"], label: `servers[${s.id}].id`, message: "two servers share this id" });
+    seen.set(s.id, i);
+  });
+  S.draft.apps.forEach((a, i) => (a.configs || []).forEach((c, j) => {
+    if (c._git === true && !c.git_repo) extra.push({ path: ["apps", i, "configs", j, "git_repo"], label: `apps[${a.id}].configs[${c.id}].git_repo`, message: "enter the git repo folder, or choose No" });
+  }));
+  return extra;
+}
+
+/* ------------------------------------------------------------------ preview */
+let previewTimer = null;
+function schedulePreview(delay = 200) { clearTimeout(previewTimer); previewTimer = setTimeout(runPreview, delay); }
+async function runPreview() {
+  const seq = ++S.previewSeq;
+  try {
+    const res = await api("/api/preview", { template: toFile(S.draft), original_id: S.originalId });
+    if (seq !== S.previewSeq || !S.draft) return;
+    S.yaml = res.yaml;
+    S.errors = [...clientIssues(), ...res.errors];
+    S.warnings = res.warnings;
+    S.auth = { ...S.auth, ...res.auth };
+    indexIssues();
+    renderFile(); renderRail(); renderBar(); paintIssues(); renderRoute(); renderBanner(); paintRows();
+  } catch (e) { toast(e.message, true); }
+}
+function changed() { S.dirty = true; renderBar(); renderRail(); renderRoute(); schedulePreview(); }
+
+/* ------------------------------------------------------------------ fields */
+function field(o) {
+  const v = getAt(S.draft, o.path);
+  const id = "f-" + o.path.replace(/\./g, "-");
+  const cls = o.mono ? "mono" : "";
+  const found = S.wizard?.found?.has(o.path) ? `<span class="tag found">found on the server</span>` : "";
+  let input;
+  if (o.area) {
+    const need = String(v ?? "").split("\n").length + 1;
+    input = `<textarea id="${id}" data-bind="${o.path}" rows="${Math.min(Math.max(o.rows || 3, need), 16)}" class="${cls}" placeholder="${esc(o.placeholder || "")}" spellcheck="${o.spell ? "true" : "false"}">${esc(v ?? "")}</textarea>`;
+  } else if (o.options) {
+    input = `<select id="${id}" data-bind="${o.path}">${o.options.map(([val, lab]) => `<option value="${esc(val)}" ${String(v ?? "") === String(val) ? "selected" : ""}>${esc(lab)}</option>`).join("")}</select>`;
+  } else {
+    const val = Array.isArray(v) ? v.join(", ") : v ?? "";
+    input = `<input id="${id}" type="text" data-bind="${o.path}" ${o.num ? 'data-num="1" inputmode="numeric"' : ""} ${o.csv ? 'data-csv="1"' : ""} class="${cls}" value="${esc(val)}" placeholder="${esc(o.placeholder || "")}" spellcheck="false" autocomplete="off" ${o.readonly ? "readonly" : ""}>`;
+  }
+  return `<div class="field ${o.wide ? "wide" : ""}" data-issue="${o.path}"><label for="${id}">${esc(o.label)}${found}</label>${input}${o.hint ? `<p class="hint">${o.hint}</p>` : ""}<p class="msg" aria-live="polite"></p></div>`;
+}
+function localField(o) {
+  const id = "l-" + o.kind + "-" + (o.name || "x");
+  return `<div class="field ${o.wide ? "wide" : ""}"><label for="${id}">${esc(o.label)}</label>
+    <input id="${id}" type="text" class="mono" data-local="${o.kind}" data-lname="${esc(o.name || "")}" ${o.detect ? `data-detect="${esc(o.detect)}"` : ""} value="${esc(o.value || "")}" placeholder="${esc(o.placeholder || "")}" spellcheck="false" autocomplete="off" ${o.disabled ? "disabled" : ""}>
+    ${o.hint ? `<p class="hint">${o.hint}</p>` : ""}<p class="msg" aria-live="polite"></p></div>`;
+}
+/* rarely needed fields, behind a toggle; it opens by itself when one of them has a problem */
+function more(key, paths, html, label = "More options") {
+  const open = S.more[key] || (worstAny(paths) === "error" && !wizardHidesIssues());
+  return `<details class="more" data-more="${key}" ${open ? "open" : ""}><summary>${esc(label)}</summary><div class="more-b">${html}</div></details>`;
+}
+function wizardHidesIssues() {
+  const w = S.wizard;
+  return !!(w && S.sel.kind === "app" && S.sel.i === w.i && !w.tried[wizardSteps()[w.step]]);
+}
+function paintIssues() {
+  const hide = wizardHidesIssues();
+  $$("[data-issue]").forEach((el) => {
+    const list = hide ? [] : S.issues.get(el.dataset.issue) || [];
+    const err = list.find((x) => x.kind === "error");
+    const w = S.wizard ? null : list.find((x) => x.kind === "warn");
+    el.classList.toggle("has-error", !!err);
+    el.classList.toggle("has-warn", !err && !!w);
+    const m = el.querySelector(":scope > .msg");
+    if (m) m.textContent = (err || w)?.message || "";
+  });
+}
+
+/* ------------------------------------------------------------------ bar */
+// inside the console: the way back to the list of templates (the browser asks first when there are unsaved changes)
+const BACK = `<a class="btn small back" href="/?token=${encodeURIComponent(TOKEN)}#/templates"><svg class="i" viewBox="0 0 16 16"><path d="M10 3.5L5.5 8l4.5 4.5"/></svg>All templates</a>`;
+function renderBar() {
+  const mid = $("#bar-mid"), acts = $("#bar-actions");
+  if (!S.draft) { mid.innerHTML = ""; acts.innerHTML = IN_CONSOLE ? "" : `<button class="btn" type="button" data-act="done">Done</button>`; if (IN_CONSOLE) mid.innerHTML = `${BACK}<span class="tname">New template</span>`; return; }
+  const n = S.errors.length;
+  const setting = !!S.wizard;
+  const state = setting ? `<span class="state dirty">Setting up</span>`
+    : n ? `<button type="button" class="state bad" data-act="first-problem">${n} thing${n === 1 ? "" : "s"} to fix</button>`
+    : S.dirty || S.isNew ? `<span class="state dirty">${S.isNew ? "Not saved yet" : "Unsaved changes"}</span>`
+    : `<span class="state ok">Saved</span>`;
+  mid.innerHTML = `${IN_CONSOLE ? BACK : ""}<span class="tname">${esc(S.draft.name || "Untitled template")}</span><span class="file">templates/${esc(S.draft.id || "…")}.yml</span>${state}`;
+  acts.innerHTML = setting ? (IN_CONSOLE ? "" : `<button class="btn quiet" type="button" data-act="done">Done</button>`) : `
+    <button class="btn ${S.showFile ? "on" : ""}" type="button" data-act="toggle-file" aria-pressed="${S.showFile}">${ICON.file}${S.showFile ? "Hide file" : "Show file"}</button>
+    <button class="btn" type="button" data-act="check" title="Check every folder, script and config file on the servers">Check on UAT</button>
+    <button class="btn primary" type="button" data-act="save" ${S.saving ? "disabled" : ""} title="Save templates/${esc(S.draft.id)}.yml (Ctrl+S)">${S.saving ? '<span class="spin"></span>' : ""}Save template</button>
+    ${IN_CONSOLE ? "" : `<button class="btn quiet" type="button" data-act="done">Done</button>`}`;
+}
+
+/* ------------------------------------------------------------------ home */
+function showHome(focusNew) {
+  S.draft = null; S.wizard = null;
+  renderBar();
+  const tpls = S.boot.templates;
+  const sample = tpls.find((t) => t.id === "shopfront") || tpls[0];
+  const others = tpls.filter((t) => t !== sample);
+  $("#view").innerHTML = `
+  <div class="home">
+    <section>
+      <h1>UAT templates</h1>
+      <p class="lede">A template tells <code>/uat-deploy</code> how one project runs on its UAT servers: where each app lives, how it is built, started and stopped, and how a new version goes live. Templates are shared through git, in the skill's <code>templates</code> folder.</p>
+      ${tpls.length ? `<ul class="tpl-list">${tpls.map((t) => `
+        <li class="tpl"><button type="button" data-open="${esc(t.id)}">
+          <span class="t-name">${esc(t.name)}</span><span class="t-id">${esc(t.id)}.yml</span>
+          ${t.description ? `<span class="t-desc">${esc(t.description)}</span>` : ""}
+          <span class="t-meta">
+            <span class="t-apps">${t.apps.map((a) => `<span class="pill">${esc(a.name || a.id)}</span>`).join("")}</span>
+            <span>${t.servers.map((s) => esc(`${s.user}@${s.host}`)).join(", ")}</span>
+            ${t.errors ? `<span class="pill bad">${t.errors} to fix</span>` : ""}
+            ${t.id === S.boot.current ? `<span>in use in /uat-deploy</span>` : ""}
+          </span>
+        </button></li>`).join("")}</ul>` : `<p class="empty">No templates yet. Create the first one.</p>`}
+    </section>
+    <aside class="newcard" id="new">
+      <h2>New template</h2>
+      <p>One template per project. Name it, then pick how to start.</p>
+      <div class="grid">
+        <div class="field wide"><label for="n-name">Project name</label><input id="n-name" type="text" placeholder="Ledger" autocomplete="off"><p class="msg" id="n-msg"></p></div>
+      </div>
+      <div class="lab" style="margin-top:18px">How do you want to start?</div>
+      <div class="choices" style="margin:8px 0 22px">
+        <label class="choice"><input type="radio" name="src" value="" checked><span><b>Answer a few questions</b> <span class="tag good">recommended</span><span class="d">The server first, then your first app, one question at a time. The skill looks in the app's folder and fills in what it finds.</span></span></label>
+        ${sample ? `<label class="choice"><input type="radio" name="src" value="${esc(sample.id)}"><span><b>Start from the ${esc(sample.name)} sample</b><span class="d">Every section filled with the ${esc(sample.name)} setup (${sample.apps.length} apps), to see a complete example. Change what differs.</span></span></label>` : ""}
+        ${others.map((t) => `<label class="choice"><input type="radio" name="src" value="${esc(t.id)}"><span><b>Copy ${esc(t.name)}</b><span class="d">${t.apps.length} app${t.apps.length === 1 ? "" : "s"}</span></span></label>`).join("")}
+      </div>
+      <button class="btn primary" type="button" data-act="create" style="width:100%;height:40px">Create template</button>
+    </aside>
+  </div>`;
+  if (focusNew) $("#n-name").focus();
+}
+
+async function createTemplate() {
+  const name = $("#n-name").value.trim(), id = slug(name);
+  const src = ($("input[name=src]:checked") || {}).value || "";
+  const msg = $("#n-msg");
+  msg.style.display = "block"; msg.style.color = "var(--bad)";
+  if (!name || !id) { msg.textContent = "Give the project a name."; $("#n-name").focus(); return; }
+  if (S.boot.templates.some((t) => t.id === id)) { msg.textContent = `A template "${id}" already exists.`; $("#n-name").focus(); return; }
+  let draft;
+  if (src) {
+    const res = await api(`/api/template?id=${encodeURIComponent(src)}`);
+    draft = fromFile(res.template);
+    draft.id = id; draft.name = name;
+  } else {
+    draft = blankTemplate(id, name);
+  }
+  S.draft = draft; S.isNew = true; S.originalId = null; S.baseline = ""; S.dirty = true;
+  S.local = { repos: {}, builds: {}, config_dir: "" }; S.auth = {}; S.detect = {}; S.open = {}; S.more = {};
+  history.replaceState(null, "", "#draft");
+  if (src) {
+    S.wizard = null; S.sel = { kind: "overview", i: 0 };
+    renderEditor(); runPreview();
+    toast(`Filled from ${src}. Change what differs, then save.`);
+  } else {
+    S.wizard = { i: 0, step: 0, tried: {}, newTemplate: true, found: new Set() };
+    S.sel = { kind: "app", i: 0 };
+    renderEditor(); runPreview();
+  }
+}
+
+async function openTemplate(id) {
+  try {
+    const res = await api(`/api/template?id=${encodeURIComponent(id)}`);
+    S.draft = fromFile(res.template); S.isNew = false; S.originalId = id; S.baseline = res.file_text; S.dirty = false;
+    S.local = res.local; S.auth = res.auth || {}; S.detect = {}; S.sel = { kind: "overview", i: 0 }; S.wizard = null; S.open = {}; S.more = {};
+    renderEditor();
+    await runPreview();
+  } catch (e) { toast(e.message, true); location.hash = "#home"; }
+}
+
+/* ------------------------------------------------------------------ editor */
+function renderEditor() {
+  $("#view").innerHTML = `<div class="editor ${S.showFile ? "with-file" : ""}" id="editor"><nav class="rail" id="rail" aria-label="Template outline"></nav><main class="pane" id="pane"></main>${S.showFile ? `<aside class="file" id="file" aria-label="Template file"></aside>` : ""}</div>`;
+  renderBar(); renderRail(); renderPane(); renderFile();
+}
+
+function renderRail() {
+  const el = $("#rail");
+  if (!el || !S.draft) return;
+  const d = S.draft, sel = S.sel;
+  const on = (k, i) => (sel.kind === k && (i === undefined || sel.i === i) ? "on" : "");
+  const dot = (p) => `<span class="sdot ${S.wizard ? "" : worstAny([p]) || ""}"></span>`;
+  const top = S.wizard ? "" : worstAny(["schema", "id", "name", "description", "defaults"]) || "";
+  el.innerHTML = `
+    <div class="rail-head"><div class="rail-title">${esc(d.name || "Untitled")}</div><div class="rail-sub">${esc(d.id || "…")}.yml</div></div>
+    <button class="nav ${on("overview")}" type="button" data-nav="overview"><span class="sdot ${top}"></span><span class="lbl">Overview</span></button>
+    <div class="group"><span>Servers</span><button type="button" data-act="add-server" aria-label="Add server">${ICON.plus}Add</button></div>
+    ${d.servers.map((s, i) => `<button class="nav ${on("server", i)}" type="button" data-nav="server:${i}">${dot(`servers.${i}`)}<span class="lbl">${esc(s.label || s.host || "New server")}</span><small></small><span class="sub2">${esc(s.user || "user")}@${esc(s.host || "host")}</span></button>`).join("")}
+    <div class="group"><span>Apps</span><button type="button" data-act="add-app" aria-label="Add app">${ICON.plus}Add</button></div>
+    ${d.apps.map((a, i) => `<button class="nav ${on("app", i)}" type="button" data-nav="app:${i}">${dot(`apps.${i}`)}<span class="lbl">${esc(a.name || a.id || "New app")}</span><small>${a.port ? esc(a.port) : ""}</small><span class="sub2">${S.wizard && S.wizard.i === i ? "setting up" : esc(styleShort(a))}</span></button>`).join("")}
+    <div class="group"><span>Claude</span></div>
+    <button class="nav ${on("instructions")}" type="button" data-nav="instructions">${dot("instructions")}<span class="lbl">Instructions</span></button>
+    <div class="rail-foot">${S.wizard ? "Finish the setup to save." : S.errors.length ? `${S.errors.length} thing${S.errors.length === 1 ? "" : "s"} to fix before saving` : "Nothing to fix"}</div>`;
+}
+function styleShort(a) {
+  const s = a.deploy?.style || "none";
+  return s === "jar-start-script" ? "jar + start script" : s === "custom" ? "own steps" : "restart only";
+}
+
+function renderPane() {
+  const el = $("#pane");
+  if (!el) return;
+  const top = el.scrollTop;
+  const k = S.sel.kind;
+  el.innerHTML = `<div class="pane-in">${k === "server" ? serverPane(S.sel.i) : k === "app" ? appPane(S.sel.i) : k === "instructions" ? instructionsPane() : overviewPane()}</div>`;
+  paintIssues(); renderRoute();
+  el.scrollTop = top;
+}
+function select(kind, i) {
+  S.sel = { kind, i: i || 0 };
+  renderRail(); renderPane();
+  const p = $("#pane"); if (p) p.scrollTop = 0;
+}
+function renderBanner() {
+  const el = $("#banner");
+  if (el) el.outerHTML = pageBanner();
+}
+function pagePrefixes() {
+  const k = S.sel.kind, i = S.sel.i;
+  return k === "server" ? [`servers.${i}`] : k === "app" ? [`apps.${i}`] : k === "instructions" ? ["instructions"] : ["schema", "id", "name", "description", "defaults", "servers", "apps"];
+}
+function pageBanner() {
+  if (S.wizard && S.sel.kind === "app" && S.sel.i === S.wizard.i) return `<div id="banner"></div>`;
+  const list = errorsUnder(pagePrefixes());
+  if (!list.length) return `<div id="banner"></div>`;
+  return `<div class="pbanner" id="banner" role="status"><b>${list.length} thing${list.length === 1 ? "" : "s"} to fix before saving</b><ul>${list.slice(0, 6).map((e) => `<li><button type="button" data-goto="${esc(issueKey(e.path))}">${esc(e.message)}${S.sel.kind === "overview" ? ` <span class="hint">(${esc(e.label)})</span>` : ""}</button></li>`).join("")}${list.length > 6 ? `<li class="hint">and ${list.length - 6} more</li>` : ""}</ul></div>`;
+}
+
+/* ---------- overview */
+function overviewPane() {
+  const d = S.draft, def = S.boot.default_timeouts;
+  return `
+  <div class="pane-head"><div><h2>${esc(d.name || "Overview")}</h2><p class="sub">templates/${esc(d.id)}.yml</p></div></div>
+  ${pageBanner()}
+  <section class="sec">
+    <div class="grid">
+      ${field({ path: "name", label: "Project name", placeholder: "Ledger" })}
+      ${S.isNew ? field({ path: "id", label: "File name", mono: true, hint: "Saved as templates/&lt;this&gt;.yml. Fixed after the first save." }) : ""}
+      ${field({ path: "description", label: "What is it? (one line, optional)", wide: true, spell: true, placeholder: "Ledger web and batch apps on the UAT server." })}
+    </div>
+  </section>
+  <section class="sec"><h3>Servers and apps</h3><p class="about">Open an app to see or change it, or add one.</p>
+    <div class="map">${d.servers.map((s) => {
+      const apps = d.apps.map((a, i) => [a, i]).filter(([a]) => a.server === s.id);
+      return `<div class="lane"><div class="lane-h"><b>${esc(s.label || s.id || "New server")}</b><span>${esc(s.user || "user")}@${esc(s.host || "host")}</span></div>
+        <div class="tiles">${apps.map(([a, i]) => `<button type="button" class="tile" data-nav="app:${i}"><b>${esc(a.name || a.id || "New app")}</b><span>${esc(styleShort(a))}${a.port ? `, port ${esc(a.port)}` : ""}</span></button>`).join("")}<button type="button" class="tile add" data-act="add-app">${ICON.plus} Add an app</button></div></div>`;
+    }).join("")}</div>
+  </section>
+  ${more("ov-defaults", ["defaults"], `
+    <p class="about" style="margin-top:0">Apps use these unless they set their own.</p>
+    <div class="grid">
+      ${field({ path: "defaults.start_timeout", label: "Wait for a start, seconds", num: true, placeholder: String(def.start) })}
+      ${field({ path: "defaults.stop_timeout", label: "Wait for a stop, seconds", num: true, placeholder: String(def.stop) })}
+      ${field({ path: "defaults.ready.log", label: "Log line that means an app has started", mono: true, wide: true, placeholder: "Started [A-Za-z0-9_$]+ in [0-9.]+ seconds" })}
+      ${field({ path: "defaults.ready.fail", label: "Log line that means it failed to start", mono: true, placeholder: "APPLICATION FAILED TO START" })}
+      ${field({ path: "defaults.ready.url", label: "Health URL, called on the server", mono: true, placeholder: "http://localhost:8080/actuator/health" })}
+    </div>
+    <div class="addline"><button class="btn small" type="button" data-act="preset-spring" data-scope="defaults">Fill in the Spring Boot lines</button></div>`, "Defaults for every app")}
+  ${more("ov-machine", [], `
+    <p class="about" style="margin-top:0">Saved only on this computer, never in the template.</p>
+    <div class="grid">
+      ${localField({ kind: "git", name: "name", label: "Your name, for config commits on the server", value: S.boot.git.name, placeholder: "Your Name" })}
+      ${localField({ kind: "git", name: "email", label: "Your email, for config commits", value: S.boot.git.email, placeholder: "you@company.com" })}
+      ${localField({ kind: "config_dir", name: "x", label: "Folder with this project's config files on your machine (optional)", value: S.local.config_dir, wide: true, placeholder: "/home/you/projects/config-repo", hint: "Where Claude looks when you say “take this key from my local config”." })}
+    </div>`, "Your settings on this machine")}`;
+}
+
+/* ---------- server */
+function serverPane(i) {
+  const s = S.draft.servers[i];
+  if (!s) return "";
+  const p = `servers.${i}`;
+  const apps = S.draft.apps.map((x, j) => [x, j]).filter(([x]) => x.server === s.id);
+  return `
+  <div class="pane-head"><div><h2>${esc(s.label || s.host || "New server")}</h2><p class="sub">${esc(s.user || "user")}@${esc(s.host || "host")}</p></div>
+    <div class="tools"><button class="btn small danger" type="button" data-act="del-server" data-i="${i}" ${S.draft.servers.length < 2 ? "disabled title='A template needs at least one server'" : ""}>${ICON.trash}Remove</button></div></div>
+  ${pageBanner()}
+  <section class="sec">${serverFields(i)}</section>
+  <section class="sec"><h3>Sign in from this machine</h3><p class="about">Saved only on this computer. Teammates set up their own.</p>${signinBlock(i)}</section>
+  <section class="sec"><h3>Notes for Claude about this server</h3><p class="about">Old tools, a different Java, scripts that clear logs: anything that matters when working on it.</p>
+    <div class="grid">${field({ path: `${p}.notes`, label: "Notes (optional)", area: true, rows: 3, wide: true, spell: true, placeholder: "git is 1.8 here, so no git -C." })}</div></section>
+  <section class="sec"><h3>Apps on this server</h3>
+    ${apps.length ? `<div class="tiles" style="padding:0">${apps.map(([x, j]) => `<button type="button" class="tile" data-nav="app:${j}"><b>${esc(x.name || x.id || "New app")}</b><span class="mono">${esc(x.dir || "folder not set")}</span></button>`).join("")}</div>` : `<p class="hint">No app uses this server yet.</p>`}
+  </section>`;
+}
+function serverFields(i, wizard) {
+  const p = `servers.${i}`;
+  return `<div class="grid ${wizard ? "two" : ""}">
+      ${field({ path: `${p}.host`, label: "IP address or host name", mono: true, placeholder: "203.0.113.25" })}
+      ${field({ path: `${p}.user`, label: "User you log in as", mono: true, placeholder: "appuser" })}
+      ${field({ path: `${p}.label`, label: "Name for it (optional)", placeholder: "Ledger UAT", wide: !!wizard })}
+    </div>
+    ${more(`srv-${i}`, [`${p}.id`, `${p}.aliases`], `<div class="grid">
+      ${field({ path: `${p}.id`, label: "Short id", mono: true, placeholder: "uat", hint: "Apps refer to the server by it." })}
+      ${field({ path: `${p}.aliases`, label: "Its names in your ~/.ssh/config", mono: true, csv: true, placeholder: "nb-uat", hint: "Lets the safety check spot ssh to it by that name." })}
+    </div>`)}`;
+}
+function signinBlock(i) {
+  const s = S.draft.servers[i];
+  const key = s.user && s.host ? `${s.user}@${s.host}` : "";
+  const a = (key && S.auth[key]) || { auth: "", key_file: "", password_saved: false };
+  const mode = S.keyMode[key] || a.auth || "key";
+  const keys = S.boot.ssh_keys;
+  const st = S.signin[key];
+  let state;
+  if (!key) state = `<div class="signin-state no">Fill in the address and user first.</div>`;
+  else if (a.auth === "password" && a.password_saved) state = `<div class="signin-state ok">${ICON.check}Signs in with the saved password.</div>`;
+  else if (a.auth === "key") state = `<div class="signin-state ok">${ICON.key}Signs in with ${a.key_file ? esc(a.key_file) : "your SSH keys (ssh-agent or ~/.ssh defaults)"}.</div>`;
+  else state = `<div class="signin-state no">Not set up on this machine yet.</div>`;
+  return `<div class="here"><div class="here-h">${ICON.laptop}<b>Only on this machine</b></div>
+      <div class="seg" role="tablist">
+        <button type="button" class="${mode === "key" ? "on" : ""}" data-act="auth-mode" data-i="${i}" data-mode="key">${ICON.key}SSH key <span class="tag good">recommended</span></button>
+        <button type="button" class="${mode === "password" ? "on" : ""}" data-act="auth-mode" data-i="${i}" data-mode="password">Password <span class="tag meh">least recommended</span></button>
+      </div>
+      ${mode === "key" ? `
+        <div class="grid" style="margin-top:14px"><div class="field wide"><label for="keyfile-${i}">Which private key?</label>
+          <input id="keyfile-${i}" class="mono" type="text" list="keys-${i}" value="${esc(a.auth === "key" ? a.key_file : "")}" placeholder="Leave empty to use ssh-agent or your default key" spellcheck="false" autocomplete="off">
+          <datalist id="keys-${i}">${keys.map((k) => `<option value="${esc(k)}">`).join("")}</datalist>
+          <p class="hint">Its <code>.pub</code> must be in <code>~/.ssh/authorized_keys</code> of ${esc(s.user || "that user")} on the server. A key with a passphrase needs <code>ssh-add</code> first.${keys.length ? ` Your keys: ${keys.map((k) => `<code>${esc(k.split("/").pop())}</code>`).join(" ")}` : ""}</p></div></div>
+        <div class="addline"><button class="btn small" type="button" data-act="save-key" data-i="${i}" ${key ? "" : "disabled"}>Use this key</button></div>` : `
+        <div class="grid" style="margin-top:14px"><div class="field wide"><label for="pw-${i}">Password for ${esc(key || "the server")}</label>
+          <input id="pw-${i}" type="password" autocomplete="new-password" placeholder="${a.password_saved ? "A password is saved; type to replace it" : "Type the password"}">
+          <p class="hint">Kept in a file only your account can read, sent once per login, never shown again. An SSH key avoids storing it.</p></div></div>
+        <div class="addline"><button class="btn small" type="button" data-act="save-pw" data-i="${i}" ${key ? "" : "disabled"}>${a.password_saved ? "Replace password" : "Save password"}</button>${a.password_saved && a.auth !== "password" ? `<button class="btn small" type="button" data-act="use-pw" data-i="${i}">Use the saved password</button>` : ""}</div>`}
+      ${state}
+      <div class="addline"><button class="btn small" type="button" data-act="test-signin" data-i="${i}" ${key ? "" : "disabled"}>Test sign-in</button>
+        ${st ? `<span class="signin-state ${st.busy ? "" : st.ok ? "ok" : "bad"}" style="margin:0">${st.busy ? '<span class="spin"></span> Signing in…' : esc(st.text)}</span>` : ""}</div>
+    </div>`;
+}
+
+/* ---------- app: a route, then one summary row per part */
+const SECTIONS = {
+  where: { t: "Where it runs", keys: ["name", "id", "server", "dir", "port", "process", "log"] },
+  run: { t: "Start and stop", keys: ["start", "stop", "start_timeout", "stop_timeout"] },
+  ready: { t: "Ready when", keys: ["ready"] },
+  build: { t: "Build", keys: ["build"] },
+  deploy: { t: "Going live", keys: ["deploy"] },
+  config: { t: "Config files", keys: ["configs"] },
+  notes: { t: "Notes for Claude", keys: ["instructions"] },
+};
+const secOf = (rest) => Object.keys(SECTIONS).find((k) => SECTIONS[k].keys.includes(rest)) || "where";
+const secPrefixes = (i, key) => SECTIONS[key].keys.map((k) => `apps.${i}.${k}`);
+function serverOptions() { return S.draft.servers.map((s) => [s.id, `${s.label || s.host || s.id} (${s.user || "user"}@${s.host || "host"})`]); }
+
+function appPane(i) {
+  const a = S.draft.apps[i];
+  if (!a) return "";
+  if (S.wizard && S.wizard.i === i) return wizardPane();
+  const srv = S.draft.servers.find((s) => s.id === a.server);
+  const rows = ["where", "run", "ready", ...((a.deploy?.style || "none") === "none" ? [] : ["build"]), "deploy", "config", "notes"];
+  return `
+  <div class="pane-head">
+    <div><h2>${esc(a.name || "New app")}</h2><p class="sub">${esc(srv ? `${srv.user || "user"}@${srv.host || "host"}` : "no server")}:${esc(a.dir || "/folder")}</p></div>
+    <div class="tools">
+      <button class="mini" type="button" data-act="move-app" data-i="${i}" data-d="-1" title="Move up" aria-label="Move up" ${i === 0 ? "disabled" : ""}>${ICON.up}</button>
+      <button class="mini" type="button" data-act="move-app" data-i="${i}" data-d="1" title="Move down" aria-label="Move down" ${i === S.draft.apps.length - 1 ? "disabled" : ""}>${ICON.down}</button>
+      <button class="btn small" type="button" data-act="dup-app" data-i="${i}">${ICON.dup}Duplicate</button>
+      <button class="btn small danger" type="button" data-act="del-app" data-i="${i}" ${S.draft.apps.length < 2 ? "disabled" : ""}>${ICON.trash}Remove</button>
+    </div>
+  </div>
+  ${pageBanner()}
+  <div class="route-wrap"><ol class="route" id="route" aria-label="What a deploy does"></ol>
+    <div class="legend"><span><i style="background:var(--local)"></i>On your machine</span><span><i style="background:var(--change)"></i>Changes the server</span><span><i style="background:var(--safe)"></i>Reads the server</span><span>Click a step to change it.</span></div></div>
+  ${rows.map((k) => secRow(i, k)).join("")}`;
+}
+function secRow(i, key) {
+  const open = !!S.open[`${i}:${key}`];
+  const w = worstAny(secPrefixes(i, key));
+  return `<section class="srow ${open ? "open" : ""} ${w === "error" ? "is-error" : ""}" id="row-${key}" data-row="${i}:${key}">
+    <button type="button" class="srow-h" data-act="toggle-row" data-i="${i}" data-k="${key}" aria-expanded="${open}">
+      <span class="srow-t">${SECTIONS[key].t}</span>
+      <span class="srow-s">${summary(i, key)}</span>
+      ${w === "error" ? `<span class="pill bad">to fix</span>` : "<span></span>"}
+      <span class="srow-e">${open ? "Close" : `${ICON.pen}Edit`}</span>
+    </button>
+    ${open ? `<div class="srow-b">${sectionBody(i, key)}</div>` : ""}
+  </section>`;
+}
+function paintRows() {
+  $$("[data-row]").forEach((el) => {
+    const [i, key] = el.dataset.row.split(":");
+    const w = worstAny(secPrefixes(+i, key));
+    el.classList.toggle("is-error", w === "error");
+    const pill = el.querySelector(".srow-h > :nth-child(3)");
+    if (pill) pill.outerHTML = w === "error" ? `<span class="pill bad">to fix</span>` : "<span></span>";
+    const sm = el.querySelector(".srow-s");
+    if (sm && !el.classList.contains("open")) sm.innerHTML = summary(+i, key);
+  });
+}
+const todo = (t) => `<span class="todo">${t}</span>`;
+function hasOwnReady(a) { return Object.values(a.ready || {}).some(Boolean); }
+function readySentence(a) {
+  const own = hasOwnReady(a), r = own ? a.ready : S.draft.defaults.ready || {};
+  const parts = [];
+  if (a.port) parts.push(`port ${a.port} is open`);
+  if (r.log && a.log) parts.push(r.log === S.boot.spring_ready.log ? "the log shows Spring Boot's “Started” line" : "the log shows its ready line");
+  if (r.url) parts.push("the health URL answers");
+  return parts.length ? `${parts.join(" and ")}${own ? "" : " (template default)"}` : "";
+}
+function summary(i, key) {
+  const a = S.draft.apps[i], d = a.deploy || {}, b = a.build || {};
+  const srv = S.draft.servers.find((s) => s.id === a.server);
+  switch (key) {
+    case "where": return a.dir ? `${esc(srv ? srv.label || srv.host || srv.id : "no server")}, <code>${esc(a.dir)}</code>${a.port ? `, port ${esc(a.port)}` : ""}` : todo("Not set yet");
+    case "run": return a.start ? `<code>${esc(a.start)}</code>, stopped with <code>${esc(a.stop || "?")}</code>` : todo("Not set yet");
+    case "ready": { const s = readySentence(a); return s ? esc(s) : todo("Not checked"); }
+    case "build": {
+      if (!b.command) return todo("Not set yet");
+      const clone = b.repo && S.local.repos[b.repo];
+      return `<code>${esc(b.command)}</code>${clone ? "" : `, ${todo("your clone isn't set")}`}`;
+    }
+    case "deploy": {
+      const st = d.style || "none";
+      if (st === "none") return "Not deployed here, only restarted";
+      if (st === "custom") return `Upload, then ${(d.steps || []).length} step${(d.steps || []).length === 1 ? "" : "s"} of your own`;
+      return `Swap the jar in <code>${esc(d.start_script || scriptOf(a.start) || "the start script")}</code>${(d.edit || "duplicate") === "replace" ? ", in place" : ", old line kept"}`;
+    }
+    case "config": return (a.configs || []).length ? (a.configs || []).map((c) => `<code>${esc((c.path || "new file").split("/").pop())}</code>`).join(", ") : todo("None");
+    case "notes": return a.instructions ? esc(a.instructions.split("\n")[0]) : todo("None");
+  }
+  return "";
+}
+function sectionBody(i, key) {
+  return key === "where" ? whereBody(i) : key === "run" ? runBody(i) : key === "ready" ? readyBody(i) : key === "build" ? buildBody(i)
+    : key === "deploy" ? deployBody(i) : key === "config" ? configBody(i) : notesBody(i);
+}
+
+function whereBody(i, wizard) {
+  const p = `apps.${i}`;
+  const many = S.draft.servers.length > 1;
+  return `<div class="grid ${wizard ? "" : ""}">
+      ${field({ path: `${p}.name`, label: "App name", placeholder: "ledger-web" })}
+      ${many ? field({ path: `${p}.server`, label: "Which server?", options: [["", "Choose a server"], ...serverOptions()] }) : ""}
+      ${field({ path: `${p}.dir`, label: "Its folder on the server", mono: true, wide: true, placeholder: "/opt/ledger/web", hint: "The folder with its start script and jar." })}
+      ${wizard ? "" : field({ path: `${p}.port`, label: "Port (leave empty if none)", num: true, mono: true, placeholder: "8080" })}
+      ${wizard ? "" : field({ path: `${p}.log`, label: "Log file", mono: true, placeholder: "/opt/ledger/logs/web.log", hint: "Used to tell when it has started." })}
+    </div>
+    ${wizard ? "" : more(`where-${i}`, [`${p}.id`, `${p}.process`, ...(many ? [] : [`${p}.server`])], `<div class="grid">
+      ${field({ path: `${p}.id`, label: "Short id", mono: true, hint: "Used in commands, like <code>deploy web</code>. Made from the name." })}
+      ${field({ path: `${p}.process`, label: "No port? Text from its command line", mono: true, placeholder: "ledger-batch.jar", hint: "Lets the skill tell whether it runs." })}
+      ${many ? "" : field({ path: `${p}.server`, label: "Server", options: [["", "Choose a server"], ...serverOptions()] })}
+    </div>`)}
+    ${wizard ? "" : `<div class="addline"><button class="btn small" type="button" data-act="detect" data-i="${i}">${ICON.scan}Look in this folder</button><span class="hint">Reads the folder on the server and suggests values. Nothing changes there.</span></div>${detectPanel(i)}`}`;
+}
+function runBody(i, wizard) {
+  const p = `apps.${i}`, a = S.draft.apps[i];
+  return `<div class="grid">
+      ${field({ path: `${p}.start`, label: "How do you start it?", mono: true, wide: true, placeholder: "./start.sh", hint: "What you type in its folder: a script like <code>./start.sh</code>, or the command itself." })}
+      ${field({ path: `${p}.stop`, label: "How do you stop it?", mono: true, wide: true, placeholder: "./stop.sh", hint: "Same idea: <code>./stop.sh</code>, or a command like <code>kill $(cat app.pid)</code>." })}
+      ${wizard ? field({ path: `${p}.port`, label: "Port it listens on (leave empty if none)", num: true, mono: true, placeholder: "8080" }) : ""}
+      ${wizard ? field({ path: `${p}.log`, label: "Its log file", mono: true, placeholder: "/opt/ledger/logs/web.log", hint: "Used to tell when it has started." }) : ""}
+    </div>
+    ${more(`run-${i}`, [`${p}.start_timeout`, `${p}.stop_timeout`, ...(wizard ? [`${p}.process`] : [])], `<div class="grid">
+      ${wizard ? field({ path: `${p}.process`, label: "No port? Text from its command line", mono: true, placeholder: "ledger-batch.jar", hint: "Lets the skill tell whether it runs." }) : ""}
+      ${field({ path: `${p}.start_timeout`, label: "Wait for a start, seconds", num: true, placeholder: String(S.draft.defaults.start_timeout || S.boot.default_timeouts.start) })}
+      ${field({ path: `${p}.stop_timeout`, label: "Wait for a stop, seconds", num: true, placeholder: String(S.draft.defaults.stop_timeout || S.boot.default_timeouts.stop) })}
+    </div>
+    <p class="hint" style="margin-top:10px">${a.port ? `After a stop the skill waits for port ${esc(a.port)} to free.` : "With a port or a process match, the skill waits for a stop to finish."} Commands that delete or reconfigure (<code>rm</code>, <code>sudo</code>, <code>git reset</code>) are refused.</p>`)}`;
+}
+function readyBody(i) {
+  const p = `apps.${i}`, a = S.draft.apps[i], own = hasOwnReady(a), dr = S.draft.defaults.ready || {};
+  const sentence = readySentence(a);
+  if (!own) return `<p style="margin-top:0">A restart counts as done when ${sentence ? esc(sentence) : "it has been started (nothing more is checked)"}.</p>
+    <div class="addline"><button class="btn small" type="button" data-act="ready-own" data-i="${i}">Set a different check for this app</button>${dr.log || dr.url ? "" : `<button class="btn small" type="button" data-act="ready-spring" data-i="${i}">It is a Spring Boot app</button>`}</div>`;
+  return `<div class="grid">
+      ${field({ path: `${p}.ready.log`, label: "Log line that means it has started", mono: true, wide: true, placeholder: "Started [A-Za-z0-9_$]+ in [0-9.]+ seconds", hint: "A pattern, matched against the log lines written after the start." })}
+    </div>
+    <div class="addline"><button class="btn small" type="button" data-act="preset-spring" data-scope="${i}">Fill in the Spring Boot line</button><button class="btn small quiet" type="button" data-act="ready-inherit" data-i="${i}">Use the template default</button></div>
+    ${more(`ready-${i}`, [`${p}.ready.fail`, `${p}.ready.url`], `<div class="grid">
+      ${field({ path: `${p}.ready.fail`, label: "Log line that means it failed", mono: true, placeholder: "APPLICATION FAILED TO START" })}
+      ${field({ path: `${p}.ready.url`, label: "Health URL, called on the server", mono: true, placeholder: "http://localhost:8080/health" })}
+    </div>`)}`;
+}
+
+/* build presets: most apps are one of these */
+const PRESETS = [
+  ["maven", "Maven"], ["module", "Maven module"], ["gradle", "Gradle"], ["other", "Something else"], ["none", "Not built here"],
+];
+function presetOf(a) {
+  if (a._preset) return a._preset;
+  const c = a.build?.command || "";
+  if ((a.deploy?.style || "none") === "none" && !c) return S.wizard && S.wizard.i === S.draft.apps.indexOf(a) ? "" : "none";
+  if (/\bmvn\b.*\s-pl\s+\S+/.test(c)) return "module";
+  if (/\bmvn\b/.test(c)) return "maven";
+  if (/gradle/.test(c)) return "gradle";
+  return c ? "other" : "";
+}
+const moduleOf = (a) => ((a.build?.command || "").match(/\s-pl\s+(\S+)/) || [])[1] || "";
+function applyPreset(i, preset, mod) {
+  const a = S.draft.apps[i];
+  a._preset = preset;
+  const b = a.build = a.build || {};
+  if (preset === "none") { a.deploy = { ...(a.deploy || {}), style: "none" }; return; }
+  if ((a.deploy?.style || "none") === "none") a.deploy = { ...(a.deploy || {}), style: "jar-start-script", edit: a.deploy?.edit || "duplicate" };
+  if (!b.repo) b.repo = suggestRepo(i);
+  if (preset === "maven") Object.assign(b, { command: "mvn clean package -DskipTests", output: "target/*.jar", detect: "pom.xml" });
+  if (preset === "gradle") Object.assign(b, { command: "./gradlew clean bootJar", output: "build/libs/*.jar", detect: "build.gradle" });
+  if (preset === "module") {
+    const m = mod ?? moduleOf(a);
+    Object.assign(b, m ? { command: `mvn clean package -DskipTests -pl ${m} -am`, output: `${m}/target/*.jar`, detect: `${m}/pom.xml` }
+                        : { command: "", output: "", detect: "" });
+  }
+}
+function suggestRepo(i) {
+  const a = S.draft.apps[i];
+  const taken = new Set(S.draft.apps.filter((x, j) => j !== i).map((x) => x.build?.repo).filter(Boolean));
+  let r = slug(a.id || a.name) || "app";
+  while (taken.has(r)) r = `${r}-repo`;
+  return r;
+}
+function buildBody(i, wizard) {
+  const a = S.draft.apps[i], b = a.build || {}, p = `apps.${i}.build`, preset = presetOf(a);
+  const repos = [...new Map(S.draft.apps.filter((x, j) => j !== i && x.build?.repo).map((x) => [x.build.repo, x])).values()];
+  const repo = b.repo || "";
+  let fields = "";
+  if (preset === "module") fields = `<div class="grid"><div class="field wide" data-issue="${p}.command"><label for="mod-${i}">Module folder in the repo</label><input id="mod-${i}" class="mono" type="text" data-module="${i}" value="${esc(moduleOf(a))}" placeholder="storefront-api" spellcheck="false" autocomplete="off"><p class="hint">Builds with <code>${esc(b.command || "mvn clean package -DskipTests -pl <module> -am")}</code></p><p class="msg"></p></div></div>`;
+  else if (preset === "other") fields = `<div class="grid">
+      ${field({ path: `${p}.command`, label: "Build command, run in the repo folder", mono: true, wide: true, placeholder: "npm run build" })}
+      ${field({ path: `${p}.output`, label: "The file it builds, relative to the repo", mono: true, wide: true, placeholder: "dist/*.zip", hint: "A pattern that matches exactly one file." })}
+    </div>`;
+  else if (preset === "maven" || preset === "gradle") fields = `<p class="hint" style="margin:0">Builds with <code>${esc(b.command)}</code> and takes <code>${esc(b.output)}</code>.</p>`;
+  return `
+    ${wizard ? "" : `<div class="lab">How is it built?</div>`}
+    <div class="chips" style="margin:8px 0 16px">${PRESETS.map(([k, l]) => `<button type="button" class="chip ${preset === k ? "on" : ""}" data-act="preset" data-i="${i}" data-p="${k}" aria-pressed="${preset === k}">${l}</button>`).join("")}</div>
+    ${preset === "none" ? `<p class="hint" style="margin:0">Then the skill doesn't deploy it. It can still restart it and change its config.</p>` : preset ? `
+      ${fields}
+      ${repos.length ? `<div class="sub-q">Which repo is it in?</div><div class="chips">${repos.map((x) => `<button type="button" class="chip ${repo === x.build.repo ? "on" : ""}" data-act="repo" data-i="${i}" data-r="${esc(x.build.repo)}">Same repo as ${esc(x.name || x.id)}</button>`).join("")}<button type="button" class="chip ${repo && !repos.some((x) => x.build.repo === repo) ? "on" : ""}" data-act="repo" data-i="${i}" data-r="">Its own repo</button></div>` : ""}
+      <div class="here" style="margin-top:16px"><div class="here-h">${ICON.laptop}<b>Only on this machine</b></div>
+        <div class="grid">${localField({ kind: "repo", name: repo, label: `Where is your clone of the repo?`, value: repo ? S.local.repos[repo] : "", placeholder: "/home/you/projects/ledger", wide: true, detect: b.detect || "", disabled: !repo, hint: "Teammates point this at their own clone." })}</div>
+      </div>
+      ${more(`build-${i}`, [`${p}.repo`, `${p}.detect`, `${p}.output`, ...(preset === "other" ? [] : [`${p}.command`])], `<div class="grid">
+        ${preset !== "other" ? field({ path: `${p}.command`, label: "Build command", mono: true, wide: true }) : ""}
+        ${preset !== "other" ? field({ path: `${p}.output`, label: "The file it builds", mono: true }) : ""}
+        ${field({ path: `${p}.repo`, label: "Repo name", mono: true, hint: "Apps built from one repo share it." })}
+        ${field({ path: `${p}.detect`, label: "A file that marks the repo", mono: true, placeholder: "pom.xml" })}
+        ${localField({ kind: "build", name: a.id, label: "Your own build command, if it differs", value: a.id ? S.local.builds[a.id] : "", placeholder: b.command ? `JAVA_HOME=/path/to/jdk ${b.command}` : "", wide: true, disabled: !a.id, hint: "Only on this machine; for example a JAVA_HOME." })}
+      </div>`)}` : ""}`;
+}
+
+function deployBody(i, wizard) {
+  const a = S.draft.apps[i], d = a.deploy || {}, st = d.style || "none", p = `apps.${i}.deploy`;
+  const r = S.detect[i];
+  const sawJar = r && r.scripts && r.scripts.some((s) => s.jars.length);
+  const card = (v, title, desc, rec) => `<label class="choice"><input type="radio" name="style-${i}" data-act="style" data-i="${i}" value="${v}" ${st === v ? "checked" : ""}><span><b>${title}</b>${rec ? ` <span class="tag good">${rec}</span>` : ""}<span class="d">${desc}</span></span></label>`;
+  const prefix = d.name_prefix || a.id || "app";
+  const ext = extOf(a.build?.output) || ".jar";
+  const sample = `${prefix}-${new Date().toLocaleString("en", { month: "short" }).toLowerCase()}-${new Date().getDate()}-my-branch${ext}`;
+  let detail = "";
+  if (st === "jar-start-script") {
+    const edit = d.edit || "duplicate", script = d.start_script || scriptOf(a.start) || "start.sh";
+    detail = `<div class="sub-q">In <code>${esc(script)}</code>, how should the java -jar line change?</div>
+      <div class="inline-radios">
+        <label><input type="radio" name="edit-${i}" data-act="edit" data-i="${i}" value="duplicate" ${edit === "duplicate" ? "checked" : ""}>Keep the old line, commented out</label>
+        <label><input type="radio" name="edit-${i}" data-act="edit" data-i="${i}" value="replace" ${edit === "replace" ? "checked" : ""}>Swap the name in place (for a java command over several lines)</label>
+      </div>
+      <div class="jarpreview">${edit === "duplicate" ? `<span class="old"># java … -jar ${esc(prefix)}-old${esc(ext)}</span>\n<span class="new">java … -jar ${esc(sample)}</span>` : `<span class="new">java … -jar ${esc(sample)}</span>`}</div>
+      ${more(`deploy-${i}`, [`${p}.start_script`, `${p}.name_prefix`], `<div class="grid">
+        ${field({ path: `${p}.start_script`, label: "Start script with the java -jar line", mono: true, placeholder: scriptOf(a.start) || "start.sh", hint: scriptOf(a.start) ? `Empty means <code>${esc(scriptOf(a.start))}</code>, the start command's script.` : "A file in the app's folder." })}
+        ${field({ path: `${p}.name_prefix`, label: "New jar names start with", mono: true, placeholder: a.id || "app", hint: `Names look like <code>${esc(sample)}</code>.` })}
+      </div>`)}`;
+  } else if (st === "custom") {
+    detail = `<div class="sub-q">After the upload, run these in the app's folder</div>
+      <p class="hint" style="margin:-4px 0 10px">Then the app restarts. Click a placeholder to insert it where the cursor is.</p>
+      ${stepsEditor(i, "steps")}
+      <div class="sub-q">To roll back, run these (optional)</div>
+      ${stepsEditor(i, "rollback")}
+      ${more(`deploy-${i}`, [`${p}.upload_dir`, `${p}.name_prefix`], `<div class="grid">
+        ${field({ path: `${p}.upload_dir`, label: "Upload to", mono: true, placeholder: a.dir || "/opt/ledger/app", hint: "Empty means the app's folder." })}
+        ${field({ path: `${p}.name_prefix`, label: "New file names start with", mono: true, placeholder: a.id || "app", hint: `Names look like <code>${esc(sample)}</code>.` })}
+      </div>`)}`;
+  }
+  return `<div class="choices">
+      ${card("jar-start-script", "Swap the jar in its start script", "The new jar is copied next to the old one, and the start script is pointed at it. Rolling back restores the script.", sawJar ? "found a java -jar line" : "")}
+      ${card("custom", "Run my own steps", "Upload the new file, then run commands you list, for example to point a current.jar link at it.")}
+      ${card("none", "Don't deploy it, only restart it", "For apps you never deploy from here, like a config server. Restart and config changes still work.")}
+    </div>${detail ? `<div style="margin-top:6px">${detail}</div>` : ""}`;
+}
+function stepsEditor(i, key) {
+  const list = S.draft.apps[i].deploy[key] || [];
+  const base = `apps.${i}.deploy.${key}`;
+  return `<div class="rows">${list.map((c, j) => `
+      <div class="row" data-issue="${base}.${j}"><span class="n">${j + 1}</span>
+        <input class="inp mono" type="text" data-bind="${base}.${j}" data-step="1" value="${esc(c)}" placeholder="${key === "steps" ? "ln -sfn {new} current.jar" : "ln -sfn previous.jar current.jar"}" spellcheck="false" autocomplete="off" aria-label="${key} ${j + 1}">
+        <span class="acts"><button class="mini" type="button" data-act="step-move" data-i="${i}" data-k="${key}" data-j="${j}" data-d="-1" aria-label="Move up" ${j === 0 ? "disabled" : ""}>${ICON.up}</button><button class="mini" type="button" data-act="step-move" data-i="${i}" data-k="${key}" data-j="${j}" data-d="1" aria-label="Move down" ${j === list.length - 1 ? "disabled" : ""}>${ICON.down}</button><button class="mini del" type="button" data-act="step-del" data-i="${i}" data-k="${key}" data-j="${j}" aria-label="Remove">${ICON.trash}</button></span>
+        <p class="msg"></p></div>`).join("")}</div>
+    <div class="addline"><button class="btn small" type="button" data-act="step-add" data-i="${i}" data-k="${key}">${ICON.plus}Add a step</button>
+      ${list.length ? `<span class="chips">${S.boot.placeholders.map((ph) => `<button type="button" class="chip ph" data-act="ph" data-ph="${ph}" title="${esc(PH_HELP[ph])}">{${ph}}</button>`).join("")}</span>` : ""}</div>`;
+}
+const PH_HELP = { new: "the new file's name", dir: "the app's folder", upload_dir: "the upload folder", stamp: "the deploy's time, like 20261104-153000" };
+
+function configBody(i, wizard) {
+  const a = S.draft.apps[i];
+  return `${(a.configs || []).map((c, j) => configCard(i, j)).join("") || (wizard ? "" : `<p class="hint" style="margin-top:0">None yet.</p>`)}
+    <div class="addline"><button class="btn small" type="button" data-act="add-config" data-i="${i}">${ICON.plus}Add a config file</button></div>`;
+}
+function configCard(i, j) {
+  const a = S.draft.apps[i], c = a.configs[j], p = `apps.${i}.configs.${j}`;
+  const inGit = c._git === true || (c._git !== false && !!c.git_repo);
+  const order = c.restart || [];
+  const fmt = c.format || guessFormat(c.path);
+  const chain = [`<li class="c">Upload</li>`, inGit ? `<li class="c">Commit as you</li>` : `<li class="c">Back up the old file</li>`]
+    .concat(order.map((id) => `<li class="c">Restart ${esc(appName(id))}</li>`));
+  if (c.verify_url && fmt === "yaml") chain.push(`<li class="r">Check the served value</li>`);
+  return `<div class="cfg" data-issue="${p}">
+    <div class="cfg-h"><b>${esc(c.path ? c.path.split("/").pop() : "New config file")}</b><button class="mini del" type="button" data-act="del-config" data-i="${i}" data-j="${j}" aria-label="Remove config file">${ICON.trash}</button></div>
+    <div class="grid">
+      ${field({ path: `${p}.path`, label: "Where is the file on the server?", mono: true, wide: true, placeholder: "/opt/ledger/config/application-uat.yml" })}
+      <div class="field wide"><span class="lab">Is it kept in a git repo on the server?</span>
+        <div class="inline-radios">
+          <label><input type="radio" name="git-${i}-${j}" data-act="cfg-git" data-i="${i}" data-j="${j}" value="1" ${inGit ? "checked" : ""}>Yes, commit each change</label>
+          <label><input type="radio" name="git-${i}-${j}" data-act="cfg-git" data-i="${i}" data-j="${j}" value="0" ${inGit ? "" : "checked"}>No, back it up before each change</label>
+        </div></div>
+      ${inGit ? field({ path: `${p}.git_repo`, label: "The repo's folder", mono: true, wide: true, placeholder: c.path ? c.path.split("/").slice(0, -1).join("/") : "/opt/ledger/config-repo" }) : ""}
+      <div class="field wide" data-issue="${p}.restart"><span class="lab">After a change, restart (in this order)</span>
+        <div class="chips">${S.draft.apps.filter((x) => x.id).map((x) => { const k = order.indexOf(x.id); return `<button type="button" class="chip ${k >= 0 ? "on" : ""}" data-act="restart" data-i="${i}" data-j="${j}" data-app="${esc(x.id)}" aria-pressed="${k >= 0}">${k >= 0 ? `<b>${k + 1}</b>` : ""}${esc(x.name || x.id)}</button>`; }).join("")}</div>
+        <p class="msg"></p></div>
+    </div>
+    ${more(`cfg-${i}-${j}`, [`${p}.id`, `${p}.format`, `${p}.served_by`, `${p}.verify_url`], `<div class="grid">
+      ${field({ path: `${p}.served_by`, label: "Served to the app by a config server?", options: [["", "No, the app reads the file itself"], ...S.draft.apps.filter((x) => x.id && x.id !== a.id).map((x) => [x.id, `Yes, by ${x.name || x.id}`])] })}
+      ${c.served_by ? field({ path: `${p}.verify_url`, label: "URL that serves it, called on the server", mono: true, placeholder: `http://localhost:8888/${c.path ? c.path.split("/").pop() : "file.yml"}` }) : ""}
+      ${field({ path: `${p}.id`, label: "Short id", mono: true, placeholder: "main" })}
+      ${field({ path: `${p}.format`, label: "Format", options: [["", `From the name (${fmt})`], ...S.boot.formats.map((f) => [f, f])] })}
+    </div>`)}
+    <ol class="chain" aria-label="What a change to this file does">${chain.join("")}</ol>
+  </div>`;
+}
+function notesBody(i) {
+  return `<div class="grid">${field({ path: `apps.${i}.instructions`, label: "What should Claude know about this app?", area: true, rows: 4, wide: true, spell: true, placeholder: "Stop batch before web. Tell #nb-qa after each deploy. The build needs VPN." })}</div>
+    <p class="hint" style="margin-top:8px">Claude reads this before working on the app. It adds knowledge; it cannot override the safety rules.</p>`;
+}
+const appName = (id) => (S.draft.apps.find((a) => a.id === id) || {}).name || id;
+function guessFormat(path) {
+  const ext = String(path || "").split(".").pop().toLowerCase();
+  return { yml: "yaml", yaml: "yaml", properties: "properties", json: "json", xml: "xml" }[ext] || "text";
+}
+function extOf(out) { const m = String(out || "").split("/").pop().match(/\*((?:\.[A-Za-z0-9]+)+)$/); return m ? m[1] : ""; }
+function scriptOf(cmd) {
+  const t = String(cmd || "").trim().split(/\s+/).filter((x) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(x));
+  if (!t.length) return "";
+  if (t[0].startsWith("./") && !t[0].slice(2).includes("/")) return t[0].slice(2);
+  if ((t[0] === "bash" || t[0] === "sh") && /^(\.\/)?[A-Za-z0-9._-]+\.sh$/.test(t[1] || "")) return t[1].replace(/^\.\//, "");
+  return "";
+}
+
+/* ---------- the route */
+function renderRoute() {
+  const el = $("#route");
+  if (!el || S.sel.kind !== "app") return;
+  const i = S.sel.i, a = S.draft.apps[i];
+  if (!a) return;
+  const d = a.deploy || {}, style = d.style || "none";
+  const srv = S.draft.servers.find((s) => s.id === a.server);
+  const p = `apps.${i}`;
+  const firstMsg = (keys) => { const e = errorsUnder(keys)[0]; return e ? e.message : ""; };
+  const head = (c) => String(c || "").trim().split(/\s+/).filter((x) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(x)).slice(0, 3).join(" ");
+  const st = [];
+  if (style !== "none") st.push({ z: "local", l: "Build", d: head(S.local.builds[a.id] || a.build?.command) || "not set", row: "build", k: [`${p}.build`] });
+  if (style === "jar-start-script") {
+    st.push({ z: "change", l: "Copy jar", d: "new name", row: "deploy", k: [] });
+    st.push({ z: "change", l: "Back up script", d: d.start_script || scriptOf(a.start) || "start script", row: "deploy", k: [`${p}.deploy.start_script`] });
+    st.push({ z: "change", l: "Switch jar", d: (d.edit || "duplicate") === "duplicate" ? "keep old line" : "in place", row: "deploy", k: [`${p}.deploy.edit`] });
+  } else if (style === "custom") {
+    st.push({ z: "change", l: "Upload", d: "new name", row: "deploy", k: [`${p}.deploy.upload_dir`] });
+    (d.steps || []).forEach((c, j) => st.push({ z: "change", l: `Step ${j + 1}`, d: head(c) || "empty", row: "deploy", k: [`${p}.deploy.steps.${j}`] }));
+  }
+  st.push({ z: "change", l: "Stop", d: head(a.stop) || "not set", row: "run", k: [`${p}.stop`] });
+  st.push({ z: "change", l: "Start", d: head(a.start) || "not set", row: "run", k: [`${p}.start`] });
+  const rs = readySentence(a);
+  st.push({ z: "read", l: "Ready", d: rs ? (a.port ? `port ${a.port}` : "log line") : "not checked", row: "ready", k: [`${p}.ready`, `${p}.log`, `${p}.port`] });
+  const hopAt = style === "none" ? 0 : 1;
+  el.innerHTML = st.map((s, n) => {
+    const w = worstAny(s.k);
+    const msg = w === "error" ? firstMsg(s.k) : "";
+    const hop = n === hopAt ? `<li class="hop" aria-hidden="true"><span>${esc(srv ? `${srv.user || "user"}@${srv.host || "host"}` : "no server")}</span></li>` : "";
+    return `${hop}<li class="st z-${s.z} ${w === "error" ? "is-error" : ""}"><button type="button" data-row-open="${i}:${s.row}" title="${esc(msg || s.d)}"><span class="dot"></span><span class="st-l">${esc(s.l)}</span><span class="st-d">${esc(msg || s.d)}</span></button></li>`;
+  }).join("");
+}
+
+/* ---------- detect */
+function detectPanel(i) {
+  const r = S.detect[i];
+  if (!r) return "";
+  if (r.busy) return `<div class="note"><span class="spin"></span> Looking in <code>${esc(S.draft.apps[i].dir)}</code> on the server…</div>`;
+  if (r.error) return `<div class="note warn">Couldn't look in the folder: ${esc(r.error)}</div>`;
+  if (r.missing) return `<div class="note warn"><code>${esc(r.dir)}</code> doesn't exist on the server.</div>`;
+  const sugs = suggestions(i, r);
+  return `<div class="detect"><div class="detect-h"><b>Found in ${esc(r.dir)}</b><span style="display:flex;gap:6px">${sugs.length ? `<button class="btn small" type="button" data-act="sug-all" data-i="${i}">Use all</button>` : ""}<button class="mini" type="button" data-act="detect-close" data-i="${i}" aria-label="Close">${ICON.x}</button></span></div>
+    ${sugs.length ? sugs.map((s, n) => { const used = getAt(S.draft, s.path) === s.value; return `<div class="sug ${used ? "used" : ""}"><span class="k">${esc(s.label)}</span><span class="v">${esc(s.value)}</span><button class="btn small" type="button" data-act="sug" data-i="${i}" data-n="${n}" ${used ? "disabled" : ""}>${used ? "In use" : "Use"}</button>${s.why ? `<span class="why">${esc(s.why)}</span>` : ""}</div>`; }).join("")
+      : `<div class="sug"><span class="k">Nothing</span><span class="v">No scripts, logs or running process found here.</span></div>`}
+  </div>`;
+}
+function suggestions(i, r) {
+  const a = S.draft.apps[i], p = `apps.${i}`, out = [];
+  const proc = r.procs.find((x) => x.ports.length) || r.procs[0];
+  const runningJar = proc ? proc.jar || ((proc.args.match(/-jar\s+(\S+\.jar)/) || [])[1] || "").split("/").pop() : "";
+  const starters = startScripts(r);
+  const matched = starters.find((s) => runningJar && s.jars.some((j) => j.jar.split("/").pop() === runningJar));
+  // several start scripts and none runs the jar that is running now: the person picks, nothing is guessed
+  const best = matched || (starters.length === 1 ? starters[0] : null);
+  if (best) out.push({ label: "Start", path: `${p}.start`, value: `./${best.name}`, why: best.jars.length ? `runs java -jar ${best.jars[0].jar}${runningJar && best.jars.some((j) => j.jar.split("/").pop() === runningJar) ? ", the jar running now" : ""}` : "starts the app" });
+  const stopper = r.scripts.find((s) => s.stops && /stop/i.test(s.name)) || r.scripts.find((s) => s.stops);
+  if (stopper) out.push({ label: "Stop", path: `${p}.stop`, value: `./${stopper.name}`, why: "stops the app" });
+  const log = best && best.logs[0];
+  if (log) out.push({ label: "Log file", path: `${p}.log`, value: log.path, why: log.append ? `${best.name} writes to it` : `${best.name} clears it on every start` });
+  const port = proc?.ports[0] || best?.ports[0];
+  if (port) out.push({ label: "Port", path: `${p}.port`, value: port, why: proc?.ports.length ? `the running app listens on it` : `set in ${best.name}` });
+  if (!port && runningJar) out.push({ label: "Process", path: `${p}.process`, value: runningJar, why: "the running app's jar" });
+  if (best && best.jars.length && (a.deploy?.style || "none") !== "custom") {
+    out.push({ label: "Going live", path: `${p}.deploy.style`, value: "jar-start-script", why: "its start script runs a jar" });
+    out.push({ label: "Script edit", path: `${p}.deploy.edit`, value: best.multiline ? "replace" : "duplicate", why: best.multiline ? "its java command spans several lines" : "its java command is on one line" });
+  }
+  return out;
+}
+function applySuggestion(s) { setAt(S.draft, s.path, s.value); }
+function startScripts(r) { return (r && r.scripts ? r.scripts : []).filter((s) => s.starts || s.jars.length); }
+function startChoices(i) {
+  const r = S.detect[i], a = S.draft.apps[i];
+  const list = startScripts(r);
+  if (!r || r.busy || r.error || list.length < 2) return "";
+  const cur = scriptOf(a.start);
+  return `<div class="field wide"><span class="lab">Several start scripts are in the folder. Which one starts it?</span>
+    <div class="chips">${list.map((s) => `<button type="button" class="chip ${cur === s.name ? "on" : ""}" data-act="pick-start" data-i="${i}" data-s="${esc(s.name)}" title="${esc(s.jars[0] ? `runs ${s.jars[0].jar}` : "")}">${esc(s.name)}${s.jars[0] ? ` <span class="hint">${esc(s.jars[0].jar)}</span>` : ""}</button>`).join("")}</div></div>`;
+}
+
+/* ------------------------------------------------------------------ the guided setup */
+const WSTEPS = {
+  server: { t: "Server", q: "Which UAT server is it?", help: "The machine the apps run on, and how this computer signs in to it.", paths: () => ["servers.0"] },
+  where: { t: "App", q: "Which app, and where is it?", help: "Its name and its folder on the server. Next, the skill looks in that folder and fills in what it finds.", paths: (i) => [`apps.${i}.name`, `apps.${i}.id`, `apps.${i}.server`, `apps.${i}.dir`] },
+  run: { t: "Start and stop", q: "How is it started and stopped?", help: "Check what was found, or fill it in.", paths: (i) => [`apps.${i}.start`, `apps.${i}.stop`, `apps.${i}.port`, `apps.${i}.log`, `apps.${i}.process`, `apps.${i}.start_timeout`, `apps.${i}.stop_timeout`] },
+  build: { t: "Build", q: "How is it built?", help: "So the skill can build a new version on your machine before a deploy.", paths: (i) => [`apps.${i}.build`] },
+  live: { t: "Going live", q: "How does a new version go live?", help: "What happens on the server after the new file is built.", paths: (i) => [`apps.${i}.deploy`] },
+  config: { t: "Config", q: "Which config files may Claude change?", help: "Optional. Add a file if you want Claude to change its settings for you. You can add more later.", optional: true, paths: (i) => [`apps.${i}.configs`] },
+  notes: { t: "Notes", q: "Anything Claude should know about this app?", help: "Optional. Things that differ from the usual: an order to follow, a manual step, someone to tell.", optional: true, paths: (i) => [`apps.${i}.instructions`] },
+};
+function wizardSteps() {
+  const w = S.wizard;
+  if (!w) return [];
+  const a = S.draft.apps[w.i];
+  const none = a && presetOf(a) === "none";
+  return [...(w.newTemplate ? ["server"] : []), "where", "run", "build", ...(none ? [] : ["live"]), "config", "notes"];
+}
+function startAppWizard() {
+  S.draft.apps.push(newApp(S.draft.servers[0]?.id));
+  const i = S.draft.apps.length - 1;
+  S.wizard = { i, step: 0, tried: {}, newTemplate: false, found: new Set() };
+  S.sel = { kind: "app", i };
+  changed(); renderRail(); renderPane();
+  $("#pane").scrollTop = 0;
+  setTimeout(() => $(`#f-apps-${i}-name`)?.focus(), 30);
+}
+function wizardPane() {
+  const w = S.wizard, steps = wizardSteps(), key = steps[w.step], def = WSTEPS[key], i = w.i;
+  const body = key === "server" ? `${serverFields(0, true)}<div class="sub-q" style="margin-top:24px">How does this computer sign in?</div>${signinBlock(0)}`
+    : key === "where" ? whereBody(i, true)
+    : key === "run" ? `${wizDetectNote(i)}<div class="grid" style="margin-bottom:18px">${startChoices(i)}</div>${runBody(i, true)}`
+    : key === "build" ? buildBody(i, true)
+    : key === "live" ? deployBody(i, true)
+    : key === "config" ? configBody(i, true) : notesBody(i);
+  const last = w.step === steps.length - 1;
+  const nextLabel = last ? (w.newTemplate ? "Finish" : "Add the app") : key === "where" ? "Next: look in the folder" : "Next";
+  return `<div class="wiz">
+    <div class="wiz-top"><ol class="wiz-steps" aria-label="Steps">${steps.map((k, n) => `<li class="${n < w.step ? "done" : n === w.step ? "now" : ""}"><span>${n < w.step ? "✓" : n + 1}</span>${WSTEPS[k].t}</li>`).join("")}</ol></div>
+    <h2 class="wiz-q">${def.q}</h2>
+    <p class="wiz-help">${def.help}</p>
+    <div class="wiz-body">${body}</div>
+    <div class="wiz-nav">
+      <button class="btn quiet" type="button" data-act="wiz-cancel">Cancel</button>
+      <span class="spacer"></span>
+      ${w.step > 0 ? `<button class="btn" type="button" data-act="wiz-back">Back</button>` : ""}
+      ${def.optional && !last ? `<button class="btn" type="button" data-act="wiz-skip">Skip</button>` : ""}
+      <button class="btn primary" type="button" data-act="wiz-next">${nextLabel}</button>
+    </div>
+  </div>`;
+}
+function wizDetectNote(i) {
+  const r = S.detect[i], dir = S.draft.apps[i].dir;
+  if (!r) return "";
+  if (r.busy) return `<div class="note"><span class="spin"></span> Looking in <code>${esc(dir)}</code> on the server…</div>`;
+  if (r.error) return `<div class="note warn"><span>Couldn't look in the folder: ${esc(r.error)} Fill these in by hand, or check the server's sign-in and try again.</span><button class="btn small" type="button" data-act="detect" data-i="${i}">Try again</button></div>`;
+  if (r.missing) return `<div class="note warn"><code>${esc(dir)}</code> doesn't exist on the server. Go back and check the folder.</div>`;
+  const n = S.wizard?.found?.size || 0;
+  return n ? `<div class="note ok">${ICON.check}<span>Looked in <code>${esc(dir)}</code> and filled in what it found, marked <span class="tag found">found on the server</span>. Check it.</span></div>`
+    : `<div class="note">Looked in <code>${esc(dir)}</code> but found no scripts or running app. Fill these in by hand.</div>`;
+}
+async function wizNext() {
+  const w = S.wizard, steps = wizardSteps(), key = steps[w.step];
+  if (key === "build" && !presetOf(S.draft.apps[w.i])) { toast("Pick how it is built.", true); return; }
+  clearTimeout(previewTimer);
+  await runPreview();
+  const errs = errorsUnder(WSTEPS[key].paths(w.i));
+  if (errs.length) {
+    w.tried[key] = true;
+    renderPane();
+    const first = $(".has-error input, .has-error textarea, .has-error select");
+    if (first) first.focus(); else toast(errs[0].message, true);
+    return;
+  }
+  if (w.step === steps.length - 1) return wizFinish();
+  w.step++;
+  renderPane(); renderRail(); $("#pane").scrollTop = 0;
+  if (key === "where") wizDetect();
+  const f = $(".wiz-body input:not([type=radio]), .wiz-body textarea");
+  if (f && !f.value) f.focus({ preventScroll: true });
+}
+async function wizDetect() {
+  const i = S.wizard.i;
+  S.wizard.found = new Set();
+  await detect(i);
+  const r = S.detect[i];
+  if (!S.wizard || S.wizard.i !== i) return;
+  if (r && !r.error && !r.missing && !r.busy) {
+    for (const s of suggestions(i, r)) {
+      const cur = getAt(S.draft, s.path);
+      const always = s.path.endsWith(".deploy.style") || s.path.endsWith(".deploy.edit");
+      if (always || cur === "" || cur == null) { setAt(S.draft, s.path, s.value); if (!always) S.wizard.found.add(s.path); }
+    }
+    changed();
+  }
+  if (S.sel.kind === "app" && S.sel.i === i) rerenderKeepFocus();
+}
+function wizBack() { S.wizard.step = Math.max(0, S.wizard.step - 1); renderPane(); renderRail(); $("#pane").scrollTop = 0; }
+function wizSkip() {
+  const w = S.wizard, key = wizardSteps()[w.step], a = S.draft.apps[w.i];
+  if (key === "config") a.configs = [];
+  if (key === "notes") a.instructions = "";
+  w.step++; changed(); renderPane(); renderRail();
+}
+function wizFinish() {
+  const w = S.wizard, a = S.draft.apps[w.i];
+  S.wizard = null; S.open = {};
+  changed();
+  if (w.newTemplate) { select("overview"); toast("Template set up. Save it to keep it; add more apps any time."); }
+  else { select("app", w.i); toast(`Added ${a.name || a.id}. Save the template to keep it.`); }
+}
+function wizCancel() {
+  const w = S.wizard;
+  if (!confirm(w.newTemplate ? "Stop creating this template? What you entered is dropped." : "Stop adding this app? What you entered is dropped.")) return;
+  S.wizard = null;
+  if (w.newTemplate) { S.draft = null; S.dirty = false; location.hash = "#home"; route(); return; }
+  S.draft.apps.splice(w.i, 1); delete S.detect[w.i];
+  changed(); select("overview");
+}
+
+/* ---------- instructions */
+function instructionsPane() {
+  return `
+  <div class="pane-head"><div><h2>Instructions for Claude</h2><p class="sub">Read before any work on this project</p></div></div>
+  ${pageBanner()}
+  <section class="sec">
+    <p class="about" style="margin-top:0">How this project differs from the usual flow: the order to deploy in, manual steps, who to tell, known traps. Instructions add knowledge; they cannot override the safety rules (approval before every change, nothing deleted, stop at the first failure).</p>
+    <div class="grid">${field({ path: "instructions", label: "For the whole project", area: true, rows: 8, wide: true, spell: true, placeholder: "Deploy batch before web. After a config change, restart the config server first. Post in #nb-uat when done." })}</div>
+  </section>
+  <section class="sec"><h3>For each app</h3><p class="about">Edited on the app's page, under Notes for Claude.</p>
+    <div class="tiles" style="padding:0">${S.draft.apps.map((a, i) => `<button type="button" class="tile" data-nav="app:${i}" data-open-row="notes"><b>${esc(a.name || a.id || "New app")}</b><span>${a.instructions ? esc(a.instructions.split("\n")[0].slice(0, 80)) : "None"}</span></button>`).join("")}</div>
+  </section>`;
+}
+
+/* ------------------------------------------------------------------ the file */
+function lineDiff(a, b) {
+  const n = a.length, m = b.length;
+  const dp = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+  for (let x = n - 1; x >= 0; x--) for (let y = m - 1; y >= 0; y--) dp[x][y] = a[x] === b[y] ? dp[x + 1][y + 1] + 1 : Math.max(dp[x + 1][y], dp[x][y + 1]);
+  const marks = new Array(m).fill(null), delBefore = new Set();
+  let x = 0, y = 0, adds = 0, dels = 0, pendingDel = false;
+  while (x < n || y < m) {
+    if (x < n && y < m && a[x] === b[y]) { if (pendingDel) { delBefore.add(y); pendingDel = false; } x++; y++; }
+    else if (y < m && (x === n || dp[x][y + 1] >= dp[x + 1][y])) { marks[y] = pendingDel ? "mod" : "add"; if (pendingDel) { pendingDel = false; dels--; adds--; } adds++; y++; }
+    else { dels++; pendingDel = true; x++; }
+  }
+  if (pendingDel) delBefore.add(m);
+  const modCount = marks.filter((v) => v === "mod").length;
+  return { marks, delBefore, adds: adds + modCount, dels: dels + modCount };
+}
+function hl(line) {
+  if (/^\s*#/.test(line)) return `<span class="c">${esc(line)}</span>`;
+  const m = line.match(/^(\s*)(- )?([^\s:#][^:#]*?)(:)(\s+.*|)$/);
+  if (m) return `${esc(m[1])}${m[2] ? `<span class="p">- </span>` : ""}<span class="k">${esc(m[3])}</span><span class="p">:</span>${m[5] ? `<span class="s">${esc(m[5])}</span>` : ""}`;
+  const l = line.match(/^(\s*)(- )(.*)$/);
+  if (l) return `${esc(l[1])}<span class="p">- </span><span class="s">${esc(l[3])}</span>`;
+  return `<span class="s">${esc(line)}</span>`;
+}
+function highlight(lines) {
+  let block = -1;
+  return lines.map((l) => {
+    const ind = l.match(/^\s*/)[0].length;
+    if (block >= 0 && (l.trim() === "" || ind > block)) return `<span class="s">${esc(l)}</span>`;
+    block = /:\s*\|[-+]?\s*$/.test(l) ? ind : -1;
+    return hl(l);
+  });
+}
+function renderFile() {
+  const el = $("#file");
+  if (!el || !S.draft) return;
+  const lines = S.yaml ? S.yaml.replace(/\n$/, "").split("\n") : [];
+  const base = S.baseline ? S.baseline.replace(/\n$/, "").split("\n") : [];
+  const diff = S.baseline ? lineDiff(base, lines) : { marks: [], delBefore: new Set(), adds: lines.length, dels: 0 };
+  const top = $(".code", el)?.scrollTop || 0;
+  el.innerHTML = `
+    <div class="file-h"><span class="fname" title="${esc(S.boot.templates_dir)}/${esc(S.draft.id)}.yml">templates/${esc(S.draft.id || "…")}.yml</span>
+      <span class="diffstat">${S.isNew ? `<span class="a">new file</span>` : diff.adds || diff.dels ? `<span class="a">+${diff.adds}</span> <span class="d">−${diff.dels}</span>` : "no changes"}</span>
+      <button class="mini" type="button" data-act="copy-yaml" title="Copy the file" aria-label="Copy the file">${ICON.copy}</button>
+      <button class="mini" type="button" data-act="toggle-file" title="Hide the file" aria-label="Hide the file">${ICON.x}</button></div>
+    <pre class="code" aria-label="Template file">${highlight(lines).map((h, n) => `<div class="ln ${diff.marks[n] || ""} ${diff.delBefore.has(n) ? "delb" : ""}"><span>${h || " "}</span></div>`).join("")}</pre>`;
+  const code = $(".code", el);
+  if (code) code.scrollTop = top;
+}
+
+/* ------------------------------------------------------------------ navigation to a problem */
+function gotoIssue(key) {
+  const p = parsePath(key);
+  if (p[0] === "apps" && typeof p[1] === "number") {
+    if (S.wizard && S.wizard.i === p[1]) { select("app", p[1]); return; }
+    S.open = { [`${p[1]}:${secOf(p[2])}`]: true };
+    select("app", p[1]);
+  } else if (p[0] === "servers") select("server", typeof p[1] === "number" ? p[1] : 0);
+  else if (p[0] === "instructions") select("instructions");
+  else select("overview");
+  requestAnimationFrame(() => {
+    let el = null;
+    for (let n = p.length; n > 0 && !el; n--) el = $(`[data-issue="${p.slice(0, n).join(".")}"]`);
+    if (!el) return;
+    const det = el.closest("details.more");
+    if (det && !det.open) { det.open = true; S.more[det.dataset.more] = true; }
+    el.scrollIntoView({ block: "center" });
+    const f = el.querySelector("input:not([disabled]):not([type=radio]), textarea:not([disabled]), select");
+    if (f) setTimeout(() => f.focus({ preventScroll: true }), 150);
+    el.classList.remove("pulse"); void el.offsetWidth; el.classList.add("pulse");
+  });
+}
+function openRow(i, key) {
+  S.open = { [`${i}:${key}`]: true };
+  if (S.sel.kind !== "app" || S.sel.i !== i) select("app", i); else renderPane();
+  requestAnimationFrame(() => { const r = $(`#row-${key}`); if (r) { r.scrollIntoView({ block: "start" }); r.classList.remove("flash"); void r.offsetWidth; r.classList.add("flash"); } });
+}
+
+/* ------------------------------------------------------------------ edits */
+function onBind(el) {
+  const path = el.dataset.bind;
+  const prev = getAt(S.draft, path);
+  let v = el.value;
+  if (el.dataset.num) v = /^\s*\d+\s*$/.test(v) ? Number(v.trim()) : v;
+  if (el.dataset.csv) v = v.split(/[\s,]+/).filter(Boolean);
+  setAt(S.draft, path, v);
+  const ps = parsePath(path);
+  if (path === "name" && S.isNew && (!S.draft.id || S.draft.id === slug(prev))) {
+    S.draft.id = slug(v);
+    const idEl = $("#f-id"); if (idEl) idEl.value = S.draft.id;
+  }
+  if (ps[0] === "apps" && ps.length === 3 && ps[2] === "name") {
+    const a = S.draft.apps[ps[1]];
+    if (!a.id || a.id === slug(prev)) { renameApp(ps[1], slug(v)); const idEl = $(`#f-apps-${ps[1]}-id`); if (idEl) idEl.value = a.id; }
+    const h = $(".pane-head h2"); if (h && !S.wizard) h.textContent = v || "New app";
+  }
+  if (ps[0] === "apps" && ps.length === 3 && ps[2] === "id") { S.draft.apps[ps[1]].id = prev; renameApp(ps[1], v); }
+  if (ps[0] === "servers" && ps.length === 3 && ps[2] === "id") S.draft.apps.forEach((a) => { if (a.server === prev) a.server = v; });
+  if (ps[0] === "servers" && ps.length === 3 && ps[2] === "label") { const h = $(".pane-head h2"); if (h) h.textContent = v || S.draft.servers[ps[1]].host || "New server"; }
+  changed();
+  if (el.tagName === "SELECT") requestRerender();
+}
+function onModule(el) {
+  const i = +el.dataset.module, m = el.value.trim().replace(/\s+/g, "");
+  applyPreset(i, "module", m);
+  const hint = el.parentElement.querySelector(".hint");
+  if (hint) hint.innerHTML = `Builds with <code>${esc(S.draft.apps[i].build.command || "mvn clean package -DskipTests -pl <module> -am")}</code>`;
+  changed();
+}
+const RERENDER_ON_BLUR = /^(apps\.\d+\.(name|dir|port|process|start|log|build\.(repo|command|output|detect)|deploy\.(start_script|name_prefix|upload_dir)|configs\.\d+\.(path|served_by|git_repo))|servers\.\d+\.(id|host|user|label)|defaults\..*)$/;
+let pointerDown = false, pendingRerender = false;
+document.addEventListener("pointerdown", () => { pointerDown = true; }, true);
+document.addEventListener("pointerup", () => { pointerDown = false; if (pendingRerender) setTimeout(flushRerender, 0); }, true);
+function requestRerender() { pendingRerender = true; if (!pointerDown) setTimeout(flushRerender, 0); }
+function flushRerender() { if (!pendingRerender || !S.draft) return; pendingRerender = false; rerenderKeepFocus(); }
+function renameApp(i, id) {
+  const a = S.draft.apps[i], old = a.id;
+  a.id = id;
+  if (!old) return;
+  for (const x of S.draft.apps) for (const c of x.configs || []) {
+    if (c.served_by === old) c.served_by = id;
+    if (Array.isArray(c.restart)) c.restart = c.restart.map((r) => (r === old ? id : r));
+  }
+}
+function rerenderKeepFocus() {
+  const a = document.activeElement, id = a?.id;
+  const sel = a && "selectionStart" in a && a.type !== "radio" ? [a.selectionStart, a.selectionEnd] : null;
+  renderPane();
+  if (id) {
+    const el = document.getElementById(id);
+    if (el) { el.focus({ preventScroll: true }); if (sel && el.setSelectionRange) try { el.setSelectionRange(...sel); } catch {} }
+  }
+}
+
+let localTimers = {};
+function onLocal(el) {
+  const kind = el.dataset.local, name = el.dataset.lname, key = `${kind}:${name}`;
+  clearTimeout(localTimers[key]);
+  localTimers[key] = setTimeout(async () => {
+    const wrap = el.closest(".field"), msg = wrap.querySelector(".msg");
+    try {
+      const res = await api("/api/local", { template_id: S.draft.id, kind, name, value: el.value, detect: el.dataset.detect || "" });
+      S.local = res.local;
+      if (kind === "git") S.boot.git[name] = el.value.trim();
+      wrap.classList.remove("has-error");
+      wrap.classList.toggle("has-warn", !!res.hint);
+      msg.textContent = res.hint || "";
+      if (!res.hint) { msg.style.display = "block"; msg.style.color = "var(--safe)"; msg.textContent = "Saved on this machine"; setTimeout(() => { msg.textContent = ""; msg.style.display = ""; msg.style.color = ""; }, 1600); }
+      renderRoute(); paintRows();
+    } catch (e) { wrap.classList.add("has-error"); msg.style.display = ""; msg.style.color = ""; msg.textContent = e.message; }
+  }, 450);
+}
+
+/* ------------------------------------------------------------------ actions */
+const ACT = {
+  "create": () => createTemplate().catch((e) => toast(e.message, true)),
+  "done": () => done(),
+  "save": () => save(),
+  "check": () => check(),
+  "first-problem": () => S.errors.length && gotoIssue(issueKey(S.errors[0].path)),
+  "toggle-file": () => { S.showFile = !S.showFile; const ed = $("#editor"); if (!ed) return; renderEditor(); },
+  "copy-yaml": () => navigator.clipboard.writeText(S.yaml).then(() => toast("Copied the file"), () => toast("Copy failed", true)),
+  "toggle-row": (b) => {
+    const k = `${b.dataset.i}:${b.dataset.k}`;
+    const opening = !S.open[k];
+    S.open = opening ? { [k]: true } : {};
+    renderPane();
+    if (opening) requestAnimationFrame(() => $(`#row-${b.dataset.k}`)?.scrollIntoView({ block: "nearest" }));
+  },
+  "add-server": () => {
+    const n = S.draft.servers.length + 1;
+    S.draft.servers.push({ id: n === 1 ? "uat" : `uat${n}`, label: "", host: "", user: "", aliases: [], notes: "" });
+    changed(); select("server", S.draft.servers.length - 1);
+  },
+  "del-server": (b) => {
+    const i = +b.dataset.i, s = S.draft.servers[i];
+    const used = S.draft.apps.filter((a) => a.server === s.id).length;
+    if (!confirm(`Remove server ${s.label || s.host || s.id}?${used ? ` ${used} app${used === 1 ? "" : "s"} will need another server.` : ""}`)) return;
+    S.draft.servers.splice(i, 1);
+    changed(); select("overview");
+  },
+  "add-app": () => {
+    if (S.wizard) { toast("Finish or cancel the app you are setting up first."); select("app", S.wizard.i); return; }
+    startAppWizard();
+  },
+  "dup-app": (b) => {
+    const i = +b.dataset.i, a = clone(S.draft.apps[i]);
+    a.name = `${a.name || a.id} copy`; a.id = slug(`${a.id}-copy`);
+    S.draft.apps.splice(i + 1, 0, a);
+    changed(); select("app", i + 1);
+  },
+  "del-app": (b) => {
+    const i = +b.dataset.i, a = S.draft.apps[i];
+    if (!confirm(`Remove ${a.name || a.id || "this app"} from the template?`)) return;
+    S.draft.apps.splice(i, 1);
+    for (const x of S.draft.apps) for (const c of x.configs || []) { if (c.served_by === a.id) c.served_by = ""; c.restart = (c.restart || []).filter((r) => r !== a.id); }
+    changed(); select("app", Math.max(0, i - 1));
+  },
+  "move-app": (b) => {
+    const i = +b.dataset.i, j = i + +b.dataset.d;
+    if (j < 0 || j >= S.draft.apps.length) return;
+    [S.draft.apps[i], S.draft.apps[j]] = [S.draft.apps[j], S.draft.apps[i]];
+    changed(); select("app", j);
+  },
+  "style": (b) => {
+    const a = S.draft.apps[+b.dataset.i], style = b.dataset.style || b.value;
+    a.deploy = { ...(a.deploy || {}), style };
+    if (style === "jar-start-script" && !a.deploy.edit) a.deploy.edit = "duplicate";
+    if (style === "custom") { a.deploy.steps = a.deploy.steps || []; a.deploy.rollback = a.deploy.rollback || []; }
+    if (style !== "none" && a._preset === "none") delete a._preset;
+    if (style === "none") a._preset = "none";
+    changed(); rerenderKeepFocus();
+  },
+  "edit": (b) => { S.draft.apps[+b.dataset.i].deploy.edit = b.value; changed(); rerenderKeepFocus(); },
+  "preset": (b) => { applyPreset(+b.dataset.i, b.dataset.p); changed(); renderPane(); if (b.dataset.p === "module") setTimeout(() => $(`#mod-${b.dataset.i}`)?.focus(), 30); },
+  "repo": (b) => { const i = +b.dataset.i, a = S.draft.apps[i]; a.build = a.build || {}; a.build.repo = b.dataset.r || suggestRepo(i); changed(); renderPane(); },
+  "preset-spring": (b) => {
+    const r = { ...S.boot.spring_ready };
+    if (b.dataset.scope === "defaults") S.draft.defaults.ready = { ...S.draft.defaults.ready, ...r };
+    else S.draft.apps[+b.dataset.scope].ready = { ...S.draft.apps[+b.dataset.scope].ready, ...r };
+    changed(); renderPane();
+  },
+  "ready-spring": (b) => { S.draft.apps[+b.dataset.i].ready = { ...S.boot.spring_ready }; changed(); renderPane(); },
+  "ready-own": (b) => {
+    const a = S.draft.apps[+b.dataset.i], dr = S.draft.defaults.ready || {};
+    a.ready = Object.values(dr).some(Boolean) ? { ...dr } : { ...S.boot.spring_ready };
+    changed(); renderPane();
+  },
+  "ready-inherit": (b) => { S.draft.apps[+b.dataset.i].ready = {}; changed(); renderPane(); },
+  "step-add": (b) => {
+    const d = S.draft.apps[+b.dataset.i].deploy;
+    (d[b.dataset.k] = d[b.dataset.k] || []).push("");
+    changed(); renderPane();
+    const rows = $$(`[data-bind^="apps.${b.dataset.i}.deploy.${b.dataset.k}."]`); rows[rows.length - 1]?.focus();
+  },
+  "step-del": (b) => { S.draft.apps[+b.dataset.i].deploy[b.dataset.k].splice(+b.dataset.j, 1); changed(); renderPane(); },
+  "step-move": (b) => {
+    const list = S.draft.apps[+b.dataset.i].deploy[b.dataset.k], j = +b.dataset.j, k = j + +b.dataset.d;
+    if (k < 0 || k >= list.length) return;
+    [list[j], list[k]] = [list[k], list[j]];
+    changed(); renderPane();
+  },
+  "ph": (b) => {
+    const el = S.lastStep && document.body.contains(S.lastStep) ? S.lastStep : null;
+    if (!el) { toast("Click into a step first, then the placeholder."); return; }
+    const s = el.selectionStart ?? el.value.length, e = el.selectionEnd ?? el.value.length, t = `{${b.dataset.ph}}`;
+    el.value = el.value.slice(0, s) + t + el.value.slice(e);
+    el.focus(); el.setSelectionRange(s + t.length, s + t.length);
+    onBind(el);
+  },
+  "add-config": (b) => {
+    const a = S.draft.apps[+b.dataset.i];
+    const n = (a.configs || []).length;
+    (a.configs = a.configs || []).push({ id: n ? `config${n + 1}` : "main", path: "", restart: a.id ? [a.id] : [], _git: false });
+    changed(); renderPane();
+    setTimeout(() => $(`#f-apps-${b.dataset.i}-configs-${n}-path`)?.focus(), 30);
+  },
+  "del-config": (b) => {
+    const a = S.draft.apps[+b.dataset.i];
+    if (!confirm("Remove this config file from the template?")) return;
+    a.configs.splice(+b.dataset.j, 1); changed(); renderPane();
+  },
+  "cfg-git": (b) => {
+    const c = S.draft.apps[+b.dataset.i].configs[+b.dataset.j];
+    if (b.value === "1") { c._git = true; if (!c.git_repo) c.git_repo = ""; } else { c._git = false; delete c.git_repo; }
+    changed(); rerenderKeepFocus();
+  },
+  "restart": (b) => {
+    const c = S.draft.apps[+b.dataset.i].configs[+b.dataset.j];
+    const id = b.dataset.app, list = c.restart || [];
+    c.restart = list.includes(id) ? list.filter((x) => x !== id) : [...list, id];
+    changed(); renderPane();
+  },
+  "pick-start": (b) => {
+    const i = +b.dataset.i, a = S.draft.apps[i], r = S.detect[i];
+    const sc = startScripts(r).find((x) => x.name === b.dataset.s);
+    a.start = `./${b.dataset.s}`;
+    if (sc && sc.logs[0] && (!a.log || S.wizard?.found?.has(`apps.${i}.log`))) { a.log = sc.logs[0].path; S.wizard?.found?.add(`apps.${i}.log`); }
+    if (sc && sc.jars.length) a.deploy = { ...(a.deploy || {}), edit: sc.multiline ? "replace" : "duplicate" };
+    changed(); rerenderKeepFocus();
+  },
+  "detect": (b) => (S.wizard && S.wizard.i === +b.dataset.i ? wizDetect() : detect(+b.dataset.i)),
+  "detect-close": (b) => { delete S.detect[+b.dataset.i]; renderPane(); },
+  "sug": (b) => { const i = +b.dataset.i; applySuggestion(suggestions(i, S.detect[i])[+b.dataset.n]); changed(); renderPane(); },
+  "sug-all": (b) => { const i = +b.dataset.i; suggestions(i, S.detect[i]).forEach(applySuggestion); changed(); renderPane(); toast("Filled in what was found. Check the other sections."); },
+  "auth-mode": (b) => { const s = S.draft.servers[+b.dataset.i]; S.keyMode[`${s.user}@${s.host}`] = b.dataset.mode; rerenderKeepFocus(); },
+  "save-key": (b) => saveAuth(+b.dataset.i, "key"),
+  "save-pw": (b) => saveAuth(+b.dataset.i, "password"),
+  "use-pw": (b) => saveAuth(+b.dataset.i, "password", true),
+  "test-signin": (b) => testSignin(+b.dataset.i),
+  "close-layer": () => closeLayer(),
+  "wiz-next": () => wizNext(),
+  "wiz-back": () => wizBack(),
+  "wiz-skip": () => wizSkip(),
+  "wiz-cancel": () => wizCancel(),
+};
+
+/* ------------------------------------------------------------------ server calls */
+async function save() {
+  if (!S.draft || S.saving) return;
+  if (S.wizard) { toast("Finish or cancel the setup first.", true); select("app", S.wizard.i); return; }
+  clearTimeout(previewTimer);
+  await runPreview();
+  if (S.errors.length) { toast(`${S.errors.length} thing${S.errors.length === 1 ? "" : "s"} to fix first.`, true); gotoIssue(issueKey(S.errors[0].path)); return; }
+  S.saving = true; renderBar();
+  try {
+    const res = await api("/api/save", { template: toFile(S.draft), original_id: S.originalId });
+    const created = S.isNew;
+    S.baseline = res.yaml; S.yaml = res.yaml; S.isNew = false; S.originalId = res.id; S.dirty = false;
+    S.boot.templates = res.templates;
+    history.replaceState(null, "", `#edit/${res.id}`);
+    toast(`${created ? "Created" : "Saved"} templates/${res.id}.yml`);
+    renderPane(); renderFile();
+  } catch (e) {
+    if (e.data?.errors) { S.errors = e.data.errors; indexIssues(); paintIssues(); renderBanner(); }
+    toast(e.message, true);
+  } finally { S.saving = false; renderBar(); renderRail(); }
+}
+
+async function done() {
+  if (S.dirty && !confirm("You have unsaved changes. Close without saving them?")) return;
+  if (IN_CONSOLE) { S.dirty = false; location.href = `/?token=${encodeURIComponent(TOKEN)}#/templates`; return; }
+  try { await api("/api/done", {}); } catch {}
+  S.dirty = false;
+  $(".bar").remove();
+  $("#view").innerHTML = `<div class="closed"><h1>All set</h1><p>The configurator is closed. Go back to the terminal: Claude picks up from here and can check the template on UAT.</p><p>To open it again, run <code>/uat-deploy</code> and choose Templates.</p></div>`;
+}
+
+async function check() {
+  if (!S.draft) return;
+  openLayer(`<div class="drawer-h"><h3>Check on UAT</h3><button class="mini" type="button" data-act="close-layer" aria-label="Close">${ICON.x}</button></div><div class="drawer-b"><p class="hint" style="margin-top:14px">Signing in and checking every folder, script, log folder and config file of this template. Nothing changes on the servers.</p><p><span class="spin"></span></p></div>`);
+  try {
+    const r = await api("/api/check", { template: toFile(S.draft) });
+    const fails = r.groups.reduce((n, g) => n + g.items.filter((x) => x.status === "FAIL").length, 0);
+    $(".drawer-b").innerHTML = r.error && !r.groups.length ? `<div class="verdict bad">${esc(r.error)}</div>`
+      : `<div class="verdict ${fails || !r.ok ? "bad" : "ok"}">${fails ? `${fails} check${fails === 1 ? "" : "s"} failed` : r.ok ? "Everything the template names exists on the servers." : esc(r.error || "The check did not finish.")}</div>
+         ${r.groups.map((g) => `<div class="cgroup"><h4>${esc(g.server)}<span>${esc(g.target)}</span></h4>${g.items.map((x) => `<div class="citem"><span class="s ${x.status}">${x.status}</span><span class="a">${esc(x.app)}</span><span class="t">${esc(x.text)}</span></div>`).join("")}</div>`).join("")}`;
+  } catch (e) { $(".drawer-b").innerHTML = `<div class="verdict bad">${esc(e.message)}</div>`; }
+}
+
+async function detect(i) {
+  const a = S.draft.apps[i];
+  if (!a.server || !a.dir) { toast("Pick the server and enter the folder first.", true); return; }
+  S.detect[i] = { busy: true };
+  if (S.sel.kind === "app" && S.sel.i === i) rerenderKeepFocus();
+  try { S.detect[i] = await api("/api/detect", { template: toFile(S.draft), server: a.server, dir: a.dir }); }
+  catch (e) { S.detect[i] = { error: e.message }; }
+  if (S.sel.kind === "app" && S.sel.i === i) rerenderKeepFocus();
+}
+
+async function saveAuth(i, how, useSaved) {
+  const s = S.draft.servers[i], key = `${s.user}@${s.host}`;
+  const body = { host: s.host, user: s.user, auth: how };
+  if (how === "key") body.key_file = $(`#keyfile-${i}`)?.value || "";
+  if (how === "password" && !useSaved) {
+    body.password = $(`#pw-${i}`)?.value || "";
+    if (!body.password) { toast("Type the password first.", true); $(`#pw-${i}`)?.focus(); return; }
+  }
+  try {
+    const r = await api("/api/auth", body);
+    S.auth[r.key] = r.auth; S.keyMode[key] = how; delete S.signin[key];
+    toast(how === "key" ? "This machine signs in with the SSH key" : "Password saved on this machine");
+    rerenderKeepFocus();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function testSignin(i) {
+  const s = S.draft.servers[i], key = `${s.user}@${s.host}`;
+  S.signin[key] = { busy: true }; rerenderKeepFocus();
+  try { const r = await api("/api/ping", { template: toFile(S.draft), server: s.id }); S.signin[key] = { ok: r.ok, text: r.text || (r.ok ? "Signed in" : "Sign-in failed") }; }
+  catch (e) { S.signin[key] = { ok: false, text: e.message }; }
+  rerenderKeepFocus();
+}
+
+/* ------------------------------------------------------------------ layer, toast */
+function openLayer(html) {
+  $("#layer").innerHTML = `<div class="scrim" data-act="close-layer"></div><aside class="drawer" role="dialog" aria-modal="true">${html}</aside>`;
+  $(".drawer [data-act=close-layer]")?.focus();
+}
+function closeLayer() { $("#layer").innerHTML = ""; }
+let toastTimer = null;
+function toast(text, bad) {
+  $(".toast")?.remove();
+  const el = document.createElement("div");
+  el.className = `toast ${bad ? "bad" : ""}`;
+  el.setAttribute("role", "status");
+  el.textContent = text;
+  document.body.append(el);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.remove(), bad ? 6000 : 3200);
+}
+
+/* ------------------------------------------------------------------ events */
+document.addEventListener("input", (e) => {
+  const el = e.target;
+  if (el.tagName === "TEXTAREA") { const need = el.value.split("\n").length + 1; if (need > el.rows && need <= 16) el.rows = need; }
+  if (el.dataset.module !== undefined) onModule(el);
+  else if (el.dataset.bind && el.tagName !== "SELECT") onBind(el);
+  else if (el.dataset.local) onLocal(el);
+});
+document.addEventListener("change", (e) => {
+  const el = e.target;
+  if (el.dataset.bind && el.tagName === "SELECT") onBind(el);
+  else if (el.dataset.bind && RERENDER_ON_BLUR.test(el.dataset.bind) && !S.wizard) requestRerender();
+  else if (el.dataset.module !== undefined) requestRerender();
+  if (el.dataset.act && el.type === "radio") ACT[el.dataset.act]?.(el);
+});
+document.addEventListener("click", (e) => {
+  const sum = e.target.closest("details.more > summary");
+  if (sum) S.more[sum.parentElement.dataset.more] = !sum.parentElement.open;
+}, true);
+document.addEventListener("focusin", (e) => { if (e.target.dataset?.step) S.lastStep = e.target; });
+document.addEventListener("click", (e) => {
+  const t = e.target.closest("[data-act], [data-nav], [data-row-open], [data-goto], [data-open], [data-home]");
+  if (!t) return;
+  if (t.dataset.act && t.type === "radio") return;
+  if (t.dataset.act) { e.preventDefault(); ACT[t.dataset.act]?.(t); return; }
+  if (t.dataset.nav) {
+    const [k, i] = t.dataset.nav.split(":");
+    if (k === "app" && t.dataset.openRow) { openRow(+i, t.dataset.openRow); return; }
+    S.open = {};
+    select(k, i === undefined ? 0 : +i);
+    if (innerWidth <= 860) $("#pane")?.scrollIntoView({ block: "start" });
+    return;
+  }
+  if (t.dataset.rowOpen) { const [i, k] = t.dataset.rowOpen.split(":"); openRow(+i, k); return; }
+  if (t.dataset.goto !== undefined) { gotoIssue(t.dataset.goto); return; }
+  if (t.dataset.open) { location.hash = `#edit/${t.dataset.open}`; return; }
+  if (t.dataset.home !== undefined) {
+    e.preventDefault();
+    if (S.dirty && !confirm("Leave this template without saving?")) return;
+    S.dirty = false; S.wizard = null; location.hash = "#home"; route();
+  }
+});
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); save(); }
+  if (e.key === "Escape") closeLayer();
+  if (e.key === "Enter" && e.target.id === "n-name") createTemplate().catch((x) => toast(x.message, true));
+  if (e.key === "Enter" && S.wizard && e.target.tagName === "INPUT" && e.target.type === "text" && !e.target.dataset.step && !/^(pw|keyfile)-/.test(e.target.id)) { e.preventDefault(); wizNext(); }
+});
+window.addEventListener("beforeunload", (e) => { if (S.dirty) { e.preventDefault(); e.returnValue = ""; } });
+window.addEventListener("hashchange", () => route());
+const curTheme = () => document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+const THEME_ICON = {
+  dark: '<svg class="i" viewBox="0 0 16 16"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1"/></svg>',
+  light: '<svg class="i" viewBox="0 0 16 16"><path d="M13.2 9.6A5.6 5.6 0 0 1 6.4 2.8a5.6 5.6 0 1 0 6.8 6.8z"/></svg>',
+};
+if (IN_CONSOLE) $("#theme").innerHTML = THEME_ICON[curTheme()];
+$("#theme").addEventListener("click", () => {
+  const next = curTheme() === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  if (!IN_CONSOLE) { try { localStorage.setItem("uat-deploy:theme", next); } catch {} return; }
+  $("#theme").innerHTML = THEME_ICON[next];
+  fetch(`/api/prefs?token=${encodeURIComponent(TOKEN)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ theme: next }) }).catch(() => {});
+});
+
+// one theme for the console and these pages: re-read it whenever the page is shown again
+async function syncTheme() {
+  if (!IN_CONSOLE) return;
+  try {
+    const t = (await (await fetch(`/api/prefs?token=${encodeURIComponent(TOKEN)}`)).json()).theme;
+    if (t) document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme;
+    $("#theme").innerHTML = THEME_ICON[curTheme()];
+  } catch {}
+}
+addEventListener("pageshow", syncTheme);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) syncTheme(); });
+
+/* inside the console: the same bar and the same sidebar, with Templates as the current section */
+const consoleUrl = (view) => `/?token=${encodeURIComponent(TOKEN)}#/${view}`;
+function consoleFrame() {
+  const mark = $(".mark");
+  mark.querySelector("span").textContent = "UAT console";
+  mark.href = consoleUrl("apps");
+  mark.removeAttribute("data-home");
+  const bar = $(".bar");
+  bar.insertBefore($("#theme"), null);
+  const sections = [
+    ["apps", "Apps", "Deploy, restart, change config", '<svg viewBox="0 0 20 20"><rect x="3" y="3" width="14" height="5" rx="1.2"/><rect x="3" y="12" width="14" height="5" rx="1.2"/><path d="M6 5.5h.01M6 14.5h.01"/></svg>'],
+    ["ask", "Ask UAT", "Read-only questions for Claude", '<svg viewBox="0 0 20 20"><path d="M4 4h12v9H9l-4 3v-3H4z"/><path d="M8 8.5h4"/></svg>'],
+    ["activity", "Activity", "Every change made on UAT", '<svg viewBox="0 0 20 20"><path d="M4 5h12M4 10h12M4 15h8"/></svg>'],
+    ["templates", "Templates", "Projects and this machine's settings", '<svg viewBox="0 0 20 20"><path d="M11 3H5v14h10V7z"/><path d="M11 3v4h4M8 11h4M8 14h4"/></svg>'],
+  ];
+  let foot = "";
+  try { foot = sessionStorage.getItem("uat-console:servers") || ""; } catch {}
+  const shell = document.createElement("div");
+  shell.className = "shell";
+  shell.innerHTML = `<nav class="side" aria-label="Sections"><div>${sections.map(([id, name, sub, icon]) =>
+    `<a class="csec${id === "templates" ? " on" : ""}" href="${consoleUrl(id)}"${id === "templates" ? ' aria-current="page"' : ""}>${icon}<b>${name}</b><small>${sub}</small></a>`).join("")}</div>
+    ${foot ? `<div class="side-foot">${foot}</div>` : ""}</nav>`;
+  $("#view").before(shell);
+  shell.append($("#view"));
+}
+if (IN_CONSOLE) consoleFrame();
+
+function route() {
+  const h = location.hash.slice(1);
+  if (IN_CONSOLE && (!h || h === "home")) { S.dirty = false; location.replace(consoleUrl("templates")); return; }
+  if (h.startsWith("edit/")) {
+    const [id, kind, i] = h.slice(5).split("/");
+    const go = () => { if (kind && ["app", "server", "overview", "instructions"].includes(kind)) select(kind, +i || 0); };
+    if (S.draft && S.originalId === id) { go(); return; }
+    if (S.dirty && !confirm("Leave this template without saving?")) { history.replaceState(null, "", S.originalId ? `#edit/${S.originalId}` : "#draft"); return; }
+    openTemplate(id).then(go);
+  } else if (h === "draft") {
+    if (!S.draft) { history.replaceState(null, "", "#new"); showHome(true); }
+  } else {
+    if (S.draft && S.dirty && !confirm("Leave this template without saving?")) { history.replaceState(null, "", S.originalId ? `#edit/${S.originalId}` : "#draft"); return; }
+    S.dirty = false;
+    showHome(h === "new");
+  }
+}
+
+(async () => {
+  try { S.boot = await api("/api/bootstrap"); route(); }
+  catch (e) { $("#view").innerHTML = `<div class="closed"><h1>Cannot reach the configurator</h1><p>${esc(e.message)}</p></div>`; }
+})();
+</script>
+</body>
+</html>
